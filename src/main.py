@@ -1,19 +1,19 @@
-"""HR Reporting Pipeline — entry point."""
-
-from __future__ import annotations
-
-import sys
-from pathlib import Path
+from data_loader import load_attendance_file
+from attendance_engine import process_attendance
+from report_generator import generate_report
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+def main():
+    print("Starting HR Reporting Pipeline...")
 
+    df = load_attendance_file("HR_Monthly_Report_Template.xlsx")
 
-def main(argv: list[str] | None = None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
-    print(f"HR Reporting Pipeline starting from {PROJECT_ROOT}")
-    return 0
+    attendance_data = process_attendance(df)
+
+    generate_report(attendance_data)
+
+    print("Pipeline completed successfully.")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
