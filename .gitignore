@@ -1,0 +1,27 @@
+# Excel temporary lock files
+~$*.xlsx
+~$*.xls
+~$*.docx
+
+# Windows system files
+Thumbs.db
+Desktop.ini
+*.lnk
+
+# macOS system files
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Python (if any scripts get added later)
+__pycache__/
+*.pyc
+.venv/
+venv/
