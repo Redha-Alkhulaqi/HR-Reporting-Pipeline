@@ -30,3 +30,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
