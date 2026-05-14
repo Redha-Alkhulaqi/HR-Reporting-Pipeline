@@ -4,7 +4,7 @@ import pandas as pd
 def load_attendance_file(file_path):
     print("Loading attendance file...")
 
-    preview = pd.read_excel(file_path, header=5)
-    print(preview.head(15))
+    # Row 0 of the export is a stray "Transaction" banner; real headers are on row 1.
+    df = pd.read_excel(file_path, header=1)
 
-    return preview
+    return df

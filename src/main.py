@@ -5,6 +5,7 @@ from data_loader import load_attendance_file
 from attendance_engine import process_attendance
 from report_generator import generate_report
 from excel_exporter import export_report
+from metrics_calculator import calculate_metrics
 
 
 logs_dir = PROJECT_ROOT / "logs"
@@ -30,10 +31,10 @@ def main():
 
     print("Starting HR Reporting Pipeline...")
 
-    df = load_attendance_file(PROJECT_ROOT / "HR_Monthly_Report_Template.xlsx")
+    df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
     logger.info("Attendance file loaded")
 
-    attendance_data = process_attendance(df)
+    attendance_data = calculate_metrics(df)
     logger.info("Attendance data processed")
 
     generate_report(attendance_data)

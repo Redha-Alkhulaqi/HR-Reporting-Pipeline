@@ -14,10 +14,13 @@ def export_report(data):
 
     ws["A1"] = "HR Reporting Summary"
     ws["A3"] = "Total Employees"
-    ws["B3"] = data.get("template_rows")
+    ws["B3"] = data.get("total_employees")
 
-    ws["A4"] = "Total Columns"
-    ws["B4"] = data.get("template_columns")
+    ws["A4"] = "Late Cases"
+    ws["B4"] = data.get("late_cases")
+
+    ws["A5"] = "Total Late Minutes"
+    ws["B5"] = data.get("total_late_minutes")
 
     output_dir = PROJECT_ROOT / "outputs"
     output_dir.mkdir(exist_ok=True)
