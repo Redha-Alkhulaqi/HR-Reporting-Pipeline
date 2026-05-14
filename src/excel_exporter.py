@@ -1,6 +1,7 @@
 from openpyxl import Workbook
 from datetime import datetime
-from pathlib import Path
+
+from config import PROJECT_ROOT
 
 
 def export_report(data):
@@ -18,13 +19,10 @@ def export_report(data):
     ws["A4"] = "Total Columns"
     ws["B4"] = data.get("template_columns")
 
-    output_dir = Path("outputs")
+    output_dir = PROJECT_ROOT / "outputs"
     output_dir.mkdir(exist_ok=True)
 
-    filename = (
-        f"outputs/hr_report_"
-        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    )
+    filename = output_dir / f"hr_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     wb.save(filename)
 
