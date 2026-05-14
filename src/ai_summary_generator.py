@@ -1,13 +1,12 @@
-from config import PROJECT_ROOT
+from config import REPORT_OUTPUT_DIR
 
 
 def generate_ai_input_file(metrics, attendance_daily):
-    output_dir = PROJECT_ROOT / "outputs"
-    output_dir.mkdir(exist_ok=True)
+    REPORT_OUTPUT_DIR.mkdir(exist_ok=True)
 
-    file_path = output_dir / "claude_hr_report_input.md"
+    file_path = REPORT_OUTPUT_DIR / "claude_hr_report_input.md"
 
-    late_employees = attendance_daily[attendance_daily["is_late"] == True]
+    late_employees = attendance_daily[attendance_daily["is_late"]]
     employee_summary = metrics.get("employee_summary")
 
     with open(file_path, "w", encoding="utf-8") as f:

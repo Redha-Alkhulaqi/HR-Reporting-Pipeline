@@ -1,6 +1,6 @@
 import logging
 
-from config import PROJECT_ROOT
+from config import PROJECT_ROOT, LOG_LEVEL
 from data_loader import load_attendance_file
 from report_generator import generate_report
 from excel_exporter import export_report
@@ -12,10 +12,10 @@ logs_dir = PROJECT_ROOT / "logs"
 logs_dir.mkdir(exist_ok=True)
 
 logger = logging.getLogger("hr_pipeline")
-logger.setLevel(logging.INFO)
+logger.setLevel(LOG_LEVEL)
 
 file_handler = logging.FileHandler(logs_dir / "pipeline.log", encoding="utf-8")
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(LOG_LEVEL)
 
 formatter = logging.Formatter(
     "%(asctime)s - %(levelname)s - %(message)s"
@@ -28,23 +28,27 @@ if not logger.handlers:
 
 def main():
     logger.info("Pipeline started")
-
     print("Starting HR Reporting Pipeline...")
 
-    df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
-    logger.info("Attendance file loaded")
+    try:
+        df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
+        logger.info("Attendance file loaded")
 
-    summary, daily = calculate_metrics(df)
-    logger.info("Attendance data processed")
+        summary, daily = calculate_metrics(df)
+        logger.info("Attendance data processed")
 
-    generate_report(summary)
-    logger.info("HR report generated")
+        generate_report(summary)
+        logger.info("HR report generated")
 
-    export_report(summary, daily)
-    logger.info("Excel report exported")
+        export_report(summary, daily)
+        logger.info("Excel report exported")
 
-    generate_ai_input_file(summary, daily)
-    logger.info("AI input file generated")   
+        generate_ai_input_file(summary, daily)
+        logger.info("AI input file generated")
+    except Exception:
+        logger.exception("Pipeline failed")
+        print("Pipeline failed. See logs/pipeline.log for details.")
+        raise
 
     logger.info("Pipeline completed successfully")
     print("Pipeline completed successfully.")

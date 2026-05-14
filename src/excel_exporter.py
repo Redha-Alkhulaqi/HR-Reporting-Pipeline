@@ -2,7 +2,7 @@ from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from datetime import datetime
 
-from config import PROJECT_ROOT
+from config import REPORT_OUTPUT_DIR
 
 
 def export_report(summary, daily):
@@ -26,10 +26,9 @@ def export_report(summary, daily):
     for row in dataframe_to_rows(daily, index=False, header=True):
         detail.append(row)
 
-    output_dir = PROJECT_ROOT / "outputs"
-    output_dir.mkdir(exist_ok=True)
+    REPORT_OUTPUT_DIR.mkdir(exist_ok=True)
 
-    filename = output_dir / f"hr_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = REPORT_OUTPUT_DIR / f"hr_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     wb.save(filename)
 
