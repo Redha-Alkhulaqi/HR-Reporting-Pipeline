@@ -31,10 +31,32 @@ def calculate_metrics(df):
     # as late minutes, per the Rule 6 formula MAX(0, Check-in - Shift Start).
     daily["is_late"] = daily["Delay Minutes"] > GRACE_MINUTES
 
+    late_employees = daily[daily["is_late"] == True]
+
+    employee_summary = (
+        late_employees.groupby("Employee ID")
+        .agg(
+            late_count=("is_late", "sum"),
+            total_late_minutes=("Delay Minutes", "sum"),
+            avg_late_minutes=("Delay Minutes", "mean"),
+        )
+        .reset_index()
+    )
+
+    employee_summary = employee_summary.sort_values(
+        by="total_late_minutes",
+        ascending=False
+    )
+
     summary = {
         "total_employees": df["Employee ID"].nunique(),
         "late_cases": int(daily["is_late"].sum()),
-        "total_late_minutes": int(daily.loc[daily["is_late"], "Delay Minutes"].sum()),
+        "total_late_minutes": int(
+            daily.loc[daily["is_late"], "Delay Minutes"].sum()
+        ),
+        "employee_summary": employee_summary,
     }
+
+    
 
     return summary, daily

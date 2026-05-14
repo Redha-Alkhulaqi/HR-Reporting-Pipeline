@@ -8,15 +8,24 @@ def generate_ai_input_file(metrics, attendance_daily):
     file_path = output_dir / "claude_hr_report_input.md"
 
     late_employees = attendance_daily[attendance_daily["is_late"] == True]
+    employee_summary = metrics.get("employee_summary")
 
     with open(file_path, "w", encoding="utf-8") as f:
         f.write("# Monthly HR Attendance Report Input\n\n")
 
         f.write("## Summary KPIs\n")
         for key, value in metrics.items():
-            f.write(f"- {key}: {value}\n")
+            # Do not print DataFrames inside the KPI bullet list.
+            if key != "employee_summary":
+                f.write(f"- {key}: {value}\n")
 
-        f.write("\n## Late Attendance Records\n")
+        f.write("\n\n## Top Late Employees\n")
+        if employee_summary is not None and not employee_summary.empty:
+            f.write(employee_summary.head(20).to_markdown(index=False))
+        else:
+            f.write("No late employees found.\n")
+
+        f.write("\n\n## Late Attendance Records\n")
         if late_employees.empty:
             f.write("No late attendance records found.\n")
         else:

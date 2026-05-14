@@ -2,7 +2,6 @@ import logging
 
 from config import PROJECT_ROOT
 from data_loader import load_attendance_file
-from attendance_engine import process_attendance
 from report_generator import generate_report
 from excel_exporter import export_report
 from metrics_calculator import calculate_metrics
@@ -35,17 +34,17 @@ def main():
     df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
     logger.info("Attendance file loaded")
 
-    metrics, attendance_daily = calculate_metrics(df)
+    summary, daily = calculate_metrics(df)
     logger.info("Attendance data processed")
 
-    generate_report(metrics)
+    generate_report(summary)
     logger.info("HR report generated")
 
-    export_report(metrics)
+    export_report(summary, daily)
     logger.info("Excel report exported")
 
-    generate_ai_input_file(metrics, attendance_daily)
-    logger.info("AI input file generated")
+    generate_ai_input_file(summary, daily)
+    logger.info("AI input file generated")   
 
     logger.info("Pipeline completed successfully")
     print("Pipeline completed successfully.")

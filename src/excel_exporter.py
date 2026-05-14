@@ -1,26 +1,30 @@
 from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
 from datetime import datetime
 
 from config import PROJECT_ROOT
 
 
-def export_report(data):
+def export_report(summary, daily):
     print("Exporting Excel report...")
 
     wb = Workbook()
     ws = wb.active
-
     ws.title = "HR Summary"
 
     ws["A1"] = "HR Reporting Summary"
     ws["A3"] = "Total Employees"
-    ws["B3"] = data.get("total_employees")
+    ws["B3"] = summary.get("total_employees")
 
     ws["A4"] = "Late Cases"
-    ws["B4"] = data.get("late_cases")
+    ws["B4"] = summary.get("late_cases")
 
     ws["A5"] = "Total Late Minutes"
-    ws["B5"] = data.get("total_late_minutes")
+    ws["B5"] = summary.get("total_late_minutes")
+
+    detail = wb.create_sheet("Daily Attendance")
+    for row in dataframe_to_rows(daily, index=False, header=True):
+        detail.append(row)
 
     output_dir = PROJECT_ROOT / "outputs"
     output_dir.mkdir(exist_ok=True)
