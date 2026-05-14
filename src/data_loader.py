@@ -2,9 +2,17 @@ import pandas as pd
 
 
 def load_attendance_file(file_path):
-    print("Loading attendance file...")
+    print(f"Loading attendance file: {file_path}")
 
-    # Row 0 of the export is a stray "Transaction" banner; real headers are on row 1.
-    df = pd.read_excel(file_path, header=1)
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".csv":
+        df = pd.read_csv(file_path)
+
+    elif suffix in [".xlsx", ".xls"]:
+        df = pd.read_excel(file_path, header=1)
+
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}")
 
     return df
