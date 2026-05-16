@@ -16,6 +16,7 @@ is naturally archived.
 """
 from datetime import datetime
 
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
@@ -24,6 +25,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 from config import MAX_MONTHLY_DEDUCTION, REPORT_OUTPUT_DIR
+
+
+def _sanitize_row(row):
+    """Convert pandas NA / NaT / NaN to None so openpyxl serializes the
+    cell as empty instead of raising 'Cannot convert <NA> to Excel'."""
+    return [None if pd.isna(v) else v for v in row]
 
 
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -58,7 +65,7 @@ def _write_dataframe(ws, df, start_row):
     """
     n_cols = len(df.columns)
     for r_offset, row in enumerate(dataframe_to_rows(df, index=False, header=True)):
-        for c_offset, value in enumerate(row):
+        for c_offset, value in enumerate(_sanitize_row(row)):
             ws.cell(row=start_row + r_offset, column=c_offset + 1, value=value)
     _style_header_row(ws, row=start_row, n_cols=n_cols)
     data_start = start_row + 1
@@ -73,7 +80,7 @@ def _build_data_sheet(ws, df):
         ws.append(["(no data)"])
         return
     for row in dataframe_to_rows(df, index=False, header=True):
-        ws.append(row)
+        ws.append(_sanitize_row(row))
     _style_header_row(ws, row=1, n_cols=ws.max_column)
     ws.freeze_panes = "A2"
     if ws.max_row > 1:
@@ -143,6 +150,10 @@ def _build_dashboard(wb, summary):
             f"Estimated Deduction (capped at {MAX_MONTHLY_DEDUCTION:.0f}/employee)",
             summary.get("total_deduction_capped", 0),
         ),
+        ("Overtime Cases", summary.get("overtime_cases", 0)),
+        ("Total Overtime Hours", summary.get("total_overtime_hours", 0)),
+        ("Employees With Overtime", summary.get("employees_with_overtime", 0)),
+        ("Avg Overtime Min / Case", summary.get("avg_overtime_minutes", 0)),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -212,6 +223,26 @@ def _build_dashboard(wb, summary):
                 f"M{next_row - 21}",
             )
 
+    # Overtime Summary section + Top Overtime Employees chart.
+    top_overtime = summary.get("top_overtime_employees")
+    if top_overtime is not None and not top_overtime.empty:
+        ws.cell(row=next_row, column=1,
+                value="Overtime Summary").font = _SECTION_FONT
+        next_row += 1
+        header_row, ot_start, ot_end, next_row, _ = _write_dataframe(
+            ws, top_overtime.head(10), next_row
+        )
+        # Chart: First Name (col 2) vs total_overtime_minutes (col 4).
+        labels = Reference(ws, min_col=2, min_row=ot_start, max_row=ot_end)
+        values = Reference(ws, min_col=4, min_row=ot_start, max_row=ot_end)
+        ws.add_chart(
+            _bar_chart(
+                "Top Overtime Employees (Minutes)",
+                labels, values, horizontal=True,
+            ),
+            f"E{header_row - 1}",
+        )
+
     # Employee Reconciliation section -- makes the headline count auditable.
     reconciliation = summary.get("employee_reconciliation")
     if reconciliation is not None and not reconciliation.empty:
@@ -264,6 +295,19 @@ def export_report(summary, daily):
     employee_master = summary.get("employee_master")
     if employee_master is not None and not employee_master.empty:
         _build_data_sheet(wb.create_sheet("Employee Master"), employee_master)
+
+    # Overtime sheet -- only rows where overtime actually happened.
+    overtime_rows = daily[daily.get("overtime_status") == "Overtime"]
+    if not overtime_rows.empty:
+        _build_data_sheet(
+            wb.create_sheet("Overtime"),
+            overtime_rows[[
+                "Employee ID", "First Name", "Date",
+                "Check In", "Check Out", "Shift Start", "Shift End",
+                "worked_minutes", "scheduled_minutes",
+                "overtime_minutes", "overtime_status",
+            ]],
+        )
 
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)

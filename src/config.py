@@ -33,3 +33,11 @@ RISK_MEDIUM_THRESHOLD = int(os.getenv("RISK_MEDIUM_THRESHOLD", "15"))
 # per-employee monthly total is capped at MAX_MONTHLY_DEDUCTION.
 LATE_MINUTE_COST = float(os.getenv("LATE_MINUTE_COST", "5.0"))
 MAX_MONTHLY_DEDUCTION = float(os.getenv("MAX_MONTHLY_DEDUCTION", "500.0"))
+
+# Overtime rules.
+# OVERTIME_GRACE_MINUTES: how long after Shift End a Check Out is still
+#   considered the normal close-out rather than overtime.
+# MIN_OVERTIME_MINUTES: floor below which any candidate overtime is
+#   discarded (set 0 to count every minute beyond the grace).
+OVERTIME_GRACE_MINUTES = int(os.getenv("OVERTIME_GRACE_MINUTES", "15"))
+MIN_OVERTIME_MINUTES = int(os.getenv("MIN_OVERTIME_MINUTES", "30"))

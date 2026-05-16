@@ -50,6 +50,13 @@ Daily DataFrame schema
   is_late (bool: attendance_status == "Late", kept for back compat),
   Check Out (HH:MM:SS or NaN  -- latest Check Out punch that day),
   has_check_out (bool), missing_check_out (bool),
+  Shift End (HH:MM or NaN),
+  Shift End DateTime (Timestamp; rolls to next day for night shifts),
+  Check Out DateTime (Timestamp; rolls to next day if before Check In),
+  worked_minutes, scheduled_minutes (ints),
+  overtime_minutes (int, >= 0),
+  overtime_status (str: Overtime | No Overtime | Missing Check Out |
+                   Missing Schedule),
   Department (str or NaN  -- only when source data exposed one).
 
 Employee Summary schema (per-employee, sorted by risk_score desc)
@@ -90,6 +97,8 @@ from config import (
     GRACE_MINUTES,
     LATE_MINUTE_COST,
     MAX_MONTHLY_DEDUCTION,
+    MIN_OVERTIME_MINUTES,
+    OVERTIME_GRACE_MINUTES,
     RISK_HIGH_THRESHOLD,
     RISK_MEDIUM_THRESHOLD,
 )
@@ -101,6 +110,9 @@ from config import (
 _EXCUSE_KEYWORDS = ("استأذان", "استئذان", "excuse", "permission")
 
 _SHIFT_TIME_RE = re.compile(r"\((\d{1,2}:\d{2}\s*[AP]M)", re.IGNORECASE)
+# Bare HH:MM AM/PM token (no leading bracket constraint). Used by
+# extract_shift_end so split-shift labels return the LAST end time.
+_TIME_TOKEN_RE = re.compile(r"\d{1,2}:\d{2}\s*[AP]M", re.IGNORECASE)
 
 # Source columns that we accept as the employee's department / org unit.
 _DEPARTMENT_COL_CANDIDATES = (
@@ -115,6 +127,21 @@ def extract_shift_start(working_time):
         return None
     time_text = match.group(1).replace(" ", "").upper()
     return datetime.strptime(time_text, "%I:%M%p").strftime("%H:%M")
+
+
+def extract_shift_end(working_time):
+    """Pull the LAST HH:MMAM/PM token from an Odoo Working Time label.
+
+    For split-shift labels like
+        "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (6:00PM-10:00PM)"
+    this returns the end of the LAST shift block (the close of the
+    working day) rather than the close of the first block.
+    """
+    tokens = _TIME_TOKEN_RE.findall(str(working_time))
+    if len(tokens) < 2:
+        return None
+    end_text = tokens[-1].replace(" ", "").upper()
+    return datetime.strptime(end_text, "%I:%M%p").strftime("%H:%M")
 
 
 def _is_excuse_type(type_name):
@@ -309,6 +336,99 @@ def _attach_checkout_info(daily, df):
     return daily
 
 
+def _build_shift_end_lookup(schedules_df):
+    """Return dict: cleaned employee name -> Shift End (HH:MM)."""
+    schedules = schedules_df[["Name", "Working Time"]].copy()
+    schedules["Name"] = schedules["Name"].astype(str).str.strip()
+    schedules["Shift End"] = schedules["Working Time"].apply(extract_shift_end)
+    return schedules.set_index("Name")["Shift End"].to_dict()
+
+
+def _classify_overtime_row(row):
+    """Per-row overtime computation.
+
+    Returns a dict with Shift End DateTime, Check Out DateTime,
+    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status.
+
+    Night-shift handling: if Shift End < Shift Start in clock time, the
+    shift crosses midnight and Shift End rolls to the next day. Same
+    for Check Out vs Check In.
+    """
+    if not row["has_check_out"]:
+        return {
+            "Shift End DateTime": pd.NaT,
+            "Check Out DateTime": pd.NaT,
+            "worked_minutes": 0,
+            "scheduled_minutes": 0,
+            "overtime_minutes": 0,
+            "overtime_status": "Missing Check Out",
+        }
+    if row["missing_schedule"] or pd.isna(row["Shift End"]):
+        return {
+            "Shift End DateTime": pd.NaT,
+            "Check Out DateTime": pd.NaT,
+            "worked_minutes": 0,
+            "scheduled_minutes": 0,
+            "overtime_minutes": 0,
+            "overtime_status": "Missing Schedule",
+        }
+
+    date_str = row["Date"]
+    check_in_dt = pd.to_datetime(f"{date_str} {row['Check In']}")
+    check_out_dt = pd.to_datetime(f"{date_str} {row['Check Out']}")
+    if check_out_dt < check_in_dt:
+        check_out_dt += pd.Timedelta(days=1)
+
+    shift_start_dt = pd.to_datetime(f"{date_str} {row['Shift Start']}:00")
+    shift_end_dt = pd.to_datetime(f"{date_str} {row['Shift End']}:00")
+    if shift_end_dt < shift_start_dt:
+        shift_end_dt += pd.Timedelta(days=1)
+
+    worked = int((check_out_dt - check_in_dt).total_seconds() / 60)
+    scheduled = int((shift_end_dt - shift_start_dt).total_seconds() / 60)
+
+    # Overtime = full delta past Shift End, but only when it exceeds the
+    # grace period AND clears the MIN_OVERTIME_MINUTES floor.
+    delta = int((check_out_dt - shift_end_dt).total_seconds() / 60)
+    if delta <= OVERTIME_GRACE_MINUTES:
+        overtime, status = 0, "No Overtime"
+    elif delta < MIN_OVERTIME_MINUTES:
+        overtime, status = 0, "No Overtime"
+    else:
+        overtime, status = delta, "Overtime"
+
+    return {
+        "Shift End DateTime": shift_end_dt,
+        "Check Out DateTime": check_out_dt,
+        "worked_minutes": worked,
+        "scheduled_minutes": scheduled,
+        "overtime_minutes": overtime,
+        "overtime_status": status,
+    }
+
+
+def _attach_overtime_info(daily, shift_end_lookup):
+    """Add Shift End, Shift End DateTime, Check Out DateTime,
+    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status."""
+    daily["Shift End"] = daily["First Name"].map(shift_end_lookup)
+
+    result_cols = [
+        "Shift End DateTime", "Check Out DateTime",
+        "worked_minutes", "scheduled_minutes",
+        "overtime_minutes", "overtime_status",
+    ]
+    rows = daily.apply(
+        lambda r: pd.Series(_classify_overtime_row(r), index=result_cols),
+        axis=1,
+    )
+    for col in result_cols:
+        daily[col] = rows[col]
+    daily["worked_minutes"] = daily["worked_minutes"].astype(int)
+    daily["scheduled_minutes"] = daily["scheduled_minutes"].astype(int)
+    daily["overtime_minutes"] = daily["overtime_minutes"].astype(int)
+    return daily
+
+
 def _attach_department(daily, df):
     """Map a Department column onto daily when source data exposes one."""
     dept_col = _find_column(df, _DEPARTMENT_COL_CANDIDATES)
@@ -344,6 +464,11 @@ def _build_employee_summary(daily):
                 "attendance_status",
                 lambda s: int((s == "Approved Excuse").sum()),
             ),
+            overtime_cases=(
+                "overtime_status",
+                lambda s: int((s == "Overtime").sum()),
+            ),
+            total_overtime_minutes=("overtime_minutes", "sum"),
         )
         .reset_index()
     )
@@ -351,6 +476,7 @@ def _build_employee_summary(daily):
         (per_emp["late_count"] > 0)
         | (per_emp["missing_checkout_count"] > 0)
         | (per_emp["excuse_count"] > 0)
+        | (per_emp["overtime_cases"] > 0)
     ].copy()
 
     if per_emp.empty:
@@ -360,6 +486,9 @@ def _build_employee_summary(daily):
     per_emp["late_count"] = per_emp["late_count"].astype(int)
     per_emp["missing_checkout_count"] = per_emp["missing_checkout_count"].astype(int)
     per_emp["excuse_count"] = per_emp["excuse_count"].astype(int)
+    per_emp["overtime_cases"] = per_emp["overtime_cases"].astype(int)
+    per_emp["total_overtime_minutes"] = per_emp["total_overtime_minutes"].astype(int)
+    per_emp["total_overtime_hours"] = (per_emp["total_overtime_minutes"] / 60).round(1)
     per_emp["avg_late_minutes"] = per_emp.apply(
         lambda r: int(r["total_late_minutes"] / r["late_count"])
         if r["late_count"] else 0,
@@ -393,6 +522,7 @@ def _build_employee_summary(daily):
         "Employee ID", "First Name",
         "total_late_minutes", "late_count", "avg_late_minutes",
         "missing_checkout_count", "excuse_count",
+        "overtime_cases", "total_overtime_minutes", "total_overtime_hours",
         "risk_score", "risk_level", "risk_reason",
         "estimated_deduction", "deduction_capped",
     ]
@@ -480,6 +610,33 @@ def _build_daily_trend(daily):
     grp = _aggregate_status_counts(daily, "Date")
     grp["total_unexcused_delay_minutes"] = grp["total_unexcused_delay_minutes"].astype(int)
     return grp.sort_values("Date").reset_index(drop=True)
+
+
+def _build_top_overtime_employees(daily):
+    """Per-employee overtime aggregates, sorted by total minutes desc."""
+    ot_rows = daily[daily["overtime_status"] == "Overtime"]
+    if ot_rows.empty:
+        return pd.DataFrame(
+            columns=[
+                "Employee ID", "First Name",
+                "overtime_cases", "total_overtime_minutes",
+                "avg_overtime_minutes", "total_overtime_hours",
+            ]
+        )
+    top = (
+        ot_rows.groupby(["Employee ID", "First Name"])
+        .agg(
+            overtime_cases=("overtime_minutes", "size"),
+            total_overtime_minutes=("overtime_minutes", "sum"),
+            avg_overtime_minutes=("overtime_minutes", "mean"),
+        )
+        .reset_index()
+        .sort_values("total_overtime_minutes", ascending=False)
+    )
+    top["total_overtime_minutes"] = top["total_overtime_minutes"].astype(int)
+    top["avg_overtime_minutes"] = top["avg_overtime_minutes"].astype(int)
+    top["total_overtime_hours"] = (top["total_overtime_minutes"] / 60).round(1)
+    return top.reset_index(drop=True)
 
 
 def _build_employee_reconciliation(df, schedules_df, daily):
@@ -697,9 +854,11 @@ def _build_employee_reconciliation_details(df, schedules_df, daily):
 
 def calculate_metrics(df, schedules_df, time_off_df=None):
     shift_lookup = _build_shift_lookup(schedules_df)
+    shift_end_lookup = _build_shift_end_lookup(schedules_df)
     daily = _build_daily_attendance(df, shift_lookup)
     daily = _attach_attendance_status(daily, time_off_df)
     daily = _attach_checkout_info(daily, df)
+    daily = _attach_overtime_info(daily, shift_end_lookup)
     daily = _attach_department(daily, df)
 
     late_rows = daily[daily["attendance_status"] == "Late"]
@@ -716,6 +875,16 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         df, schedules_df, daily
     )
     employee_master = _build_employee_master(df, schedules_df, daily)
+    top_overtime_employees = _build_top_overtime_employees(daily)
+
+    overtime_rows = daily[daily["overtime_status"] == "Overtime"]
+    overtime_cases = int(len(overtime_rows))
+    total_overtime_minutes = int(overtime_rows["overtime_minutes"].sum())
+    total_overtime_hours = round(total_overtime_minutes / 60, 1)
+    employees_with_overtime = int(overtime_rows["Employee ID"].nunique()) if overtime_cases else 0
+    avg_overtime_minutes = (
+        int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
+    )
 
     schedule_names = set(schedules_df["Name"].dropna().astype(str).str.strip())
     orphan_attendance_records = int(
@@ -773,6 +942,12 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "unscheduled_active_employees": unscheduled_active,
         "invalid_punches_count": invalid_punches,
         "data_quality_score": data_quality_score,
+        # Overtime KPIs.
+        "overtime_cases": overtime_cases,
+        "total_overtime_minutes": total_overtime_minutes,
+        "total_overtime_hours": total_overtime_hours,
+        "employees_with_overtime": employees_with_overtime,
+        "avg_overtime_minutes": avg_overtime_minutes,
         # DataFrames.
         "employee_summary": employee_summary,
         "status_summary": status_summary,
@@ -783,5 +958,6 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "employee_reconciliation": reconciliation_table,
         "employee_reconciliation_details": reconciliation_details,
         "employee_master": employee_master,
+        "top_overtime_employees": top_overtime_employees,
     }
     return summary, daily

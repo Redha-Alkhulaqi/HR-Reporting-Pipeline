@@ -15,13 +15,14 @@ Sections (in order):
    9. HR Audit Flags              (employees flagged for chronic late,
                                    missing checkouts, excessive excuses,
                                    no schedule, anomalies)
-  10. Department Summary          (only when department data is present)
-  11. Approved Excuse Records
-  12. Missing Punch Analysis
-  13. Employees Missing Working Schedule
-  14. Late Attendance Records
-  15. Business Logic Notes
-  16. Instructions for Claude
+  10. Overtime Analysis           (counts, hours, top overtime employees)
+  11. Department Summary          (only when department data is present)
+  12. Approved Excuse Records
+  13. Missing Punch Analysis
+  14. Employees Missing Working Schedule
+  15. Late Attendance Records
+  16. Business Logic Notes
+  17. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -312,6 +313,32 @@ def generate_ai_input_file(metrics, attendance_daily):
         )
 
         _write_hr_audit_flags(f, metrics)
+
+        f.write("\n\n## Overtime Analysis\n")
+        ot_cases = metrics.get("overtime_cases", 0)
+        ot_hours = metrics.get("total_overtime_hours", 0)
+        ot_emps = metrics.get("employees_with_overtime", 0)
+        ot_avg = metrics.get("avg_overtime_minutes", 0)
+        f.write(
+            f"- Overtime cases: **{ot_cases}**\n"
+            f"- Total overtime: **{ot_hours} hours** "
+            f"({metrics.get('total_overtime_minutes', 0)} minutes)\n"
+            f"- Employees with overtime: **{ot_emps}**\n"
+            f"- Average overtime per case: **{ot_avg} minutes**\n\n"
+        )
+        top_overtime = metrics.get("top_overtime_employees")
+        if top_overtime is not None and not top_overtime.empty:
+            f.write("### Top Overtime Employees\n")
+            f.write(top_overtime.head(20).to_markdown(index=False))
+        else:
+            f.write("_No overtime recorded this period._\n")
+        f.write(
+            "\n\n_Notes:_ Overtime is the time between Shift End and the "
+            "actual Check Out, beyond the configured grace period. Rows "
+            "with a missing Check Out or a missing Working Time cannot "
+            "contribute to overtime. Accuracy depends on the Odoo "
+            "Working Time labels reflecting each employee's true shift.\n"
+        )
 
         dept_summary = metrics.get("department_summary")
         f.write("\n\n## Department Summary\n")

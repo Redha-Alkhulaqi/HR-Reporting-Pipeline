@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-05-16 (Overtime analytics)
+- Added `extract_shift_end` that pulls the Shift End from Odoo
+  Working Time labels (uses the LAST end token for split shifts).
+- Added overtime columns to daily: `Shift End`, `Shift End DateTime`,
+  `Check Out DateTime`, `worked_minutes`, `scheduled_minutes`,
+  `overtime_minutes`, `overtime_status`.
+- Overtime is computed as `Check Out - Shift End` past the configured
+  grace period and discarded under `MIN_OVERTIME_MINUTES`. Missing
+  Check Out / Missing Schedule rows are surfaced with explicit
+  status values rather than counted as overtime.
+- Night-shift handling: Shift End and Check Out roll to the next day
+  when their clock time precedes Shift Start / Check In.
+- Added overtime KPIs (`overtime_cases`, `total_overtime_minutes`,
+  `total_overtime_hours`, `employees_with_overtime`,
+  `avg_overtime_minutes`) and a `top_overtime_employees` DataFrame.
+- Extended `employee_summary` with per-employee overtime aggregates.
+- Excel: new Overtime Summary KPIs and Top Overtime Employees chart
+  on the Dashboard, plus a dedicated Overtime sheet.
+- Claude markdown: new Overtime Analysis section with the top
+  overtime employees and the calculation notes.
+- Added `tests/test_overtime.py` covering the standard cases plus the
+  night-shift wraparound (10 new tests; 34 total).
+- Added `OVERTIME_GRACE_MINUTES` and `MIN_OVERTIME_MINUTES` to
+  `config.py`.
+
 ## 2026-05-16 (Production hardening)
 - Added Employee Master DataFrame (one row per Employee ID with Odoo
   Resource, Attendance Presence, Schedule Presence, Status Consistency,

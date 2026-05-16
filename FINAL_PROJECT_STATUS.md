@@ -43,6 +43,12 @@ and [HR_REPORTING_RULES_MASTER.md](HR_REPORTING_RULES_MASTER.md).
 - `data_quality_score` (0..100) summarizing missing schedules,
   missing checkouts, orphan rows, duplicate names, missing IDs,
   invalid punches.
+- Overtime analytics: `extract_shift_end` from Odoo Working Time,
+  per-day overtime classification (`Overtime` / `No Overtime` /
+  `Missing Check Out` / `Missing Schedule`), configurable grace and
+  minimum thresholds, night-shift handling (Shift End / Check Out
+  roll to next day), dashboard KPIs, Top Overtime Employees chart,
+  dedicated Overtime sheet, and a Claude Overtime Analysis section.
 
 ### Reporting outputs
 - Multi-sheet Excel report with embedded dashboard charts:

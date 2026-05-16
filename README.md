@@ -34,8 +34,14 @@ report.
   anomalies) on every employee.
 - `data_quality_score` (0-100) summarizing missing schedules, missing
   checkouts, orphan rows, duplicate names, invalid punches.
+- **Overtime analytics** using each employee's Shift End from Odoo:
+  per-day `overtime_minutes`, `overtime_status`, configurable grace
+  and minimum thresholds, night-shift handling, dashboard KPIs, an
+  Overtime sheet, a Top Overtime Employees chart, and a Claude
+  Overtime Analysis section.
 - CLI period filter: `--month YYYY-MM` or `--from/--to YYYY-MM-DD`.
-- pytest test suite covering metrics, validators, and time-off logic.
+- pytest test suite covering metrics, validators, time-off logic,
+  and overtime.
 
 ## Input Files
 

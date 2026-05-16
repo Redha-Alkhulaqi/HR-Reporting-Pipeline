@@ -116,6 +116,19 @@ deduction_capped    = min(estimated_deduction, MAX_MONTHLY_DEDUCTION)
 Per-employee values live on `employee_summary`. The Dashboard exposes
 totals: `total_estimated_deduction` and `total_deduction_capped`.
 
+### Overtime
+```
+delta = Check Out - Shift End            # both with night-shift +1d
+if delta <= OVERTIME_GRACE_MINUTES:      -> No Overtime
+elif delta <  MIN_OVERTIME_MINUTES:      -> No Overtime
+else:                                    -> overtime_minutes = delta
+```
+Missing Check Out or Missing Schedule rows are excluded with explicit
+`overtime_status` values. Per-day fields land on `daily`
+(`worked_minutes`, `scheduled_minutes`, `overtime_minutes`,
+`overtime_status`); per-employee aggregates land on `employee_summary`
+and `top_overtime_employees`.
+
 ## Output Structure
 
 ```
