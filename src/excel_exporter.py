@@ -1,18 +1,26 @@
-"""Write the monthly HR Excel report with multiple sheets and dashboard charts.
+"""Write the monthly HR Excel report.
 
-Sheets:
-- Dashboard           : KPIs, status / excused tables, embedded charts.
-- Employee Summary    : per-employee late + risk + payroll aggregates.
-- Daily Attendance    : the full daily DataFrame with every classified row.
-- Daily Trend         : per-day counts and unexcused minutes.
-- Missing Punches     : days with a Check In but no Check Out (optional).
-- Department Summary  : per-department status counts (optional; only when
-                        the source data exposed a Department column).
+Sheets (in tab order):
+- Dashboard                     : executive view -- KPIs + 4 charts.
+- Employee Summary              : per-employee late/risk/payroll aggregates.
+- Daily Attendance              : every classified employee-day row.
+- Daily Trend                   : per-day status counts.
+- Missing Punches               : check-in days with no check-out (optional).
+- Department Summary            : per-department status counts (optional).
+- Employee Reconciliation Details: per-ID audit table.
+- Employee Master               : every employee + HR audit flags.
+- Overtime                      : rows where overtime actually happened.
+- Excluded Employees            : policy exclusions (optional).
+- Reconciliation                : the high-level employee-count taxonomy.
 
-Data sheets get bold blue headers, frozen header row, auto-filter, and
-readable column widths. Files are written under
-REPORT_OUTPUT_DIR/YYYY-MM/hr_report_YYYYMMDD_HHMMSS.xlsx so each month
-is naturally archived.
+Detail sheets get bold blue headers, frozen header row, auto-filter,
+and auto-fit column widths. Files land in
+REPORT_OUTPUT_DIR/YYYY-MM/hr_report_YYYYMMDD_HHMMSS.xlsx.
+
+The Dashboard is deliberately uncluttered: KPIs on the left, four
+consistently-sized charts in a 2x2 grid on the right, gridlines hidden,
+and the small backing tables placed below the charts so they do not
+crowd the visual area.
 """
 from datetime import datetime
 
@@ -24,20 +32,25 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from config import MAX_MONTHLY_DEDUCTION, REPORT_OUTPUT_DIR
+from config import REPORT_OUTPUT_DIR
+
+
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_HEADER_FILL = PatternFill("solid", fgColor="305496")
+_TITLE_FONT = Font(bold=True, size=16, color="1F4E79")
+_SECTION_FONT = Font(bold=True, size=11, color="1F4E79")
+_CENTER = Alignment(horizontal="center", vertical="center")
+
+# Every chart on the Dashboard uses the same size so the 2x2 grid stays
+# aligned and no chart overlaps a neighbour.
+_CHART_WIDTH = 13
+_CHART_HEIGHT = 7
 
 
 def _sanitize_row(row):
     """Convert pandas NA / NaT / NaN to None so openpyxl serializes the
     cell as empty instead of raising 'Cannot convert <NA> to Excel'."""
     return [None if pd.isna(v) else v for v in row]
-
-
-_HEADER_FONT = Font(bold=True, color="FFFFFF")
-_HEADER_FILL = PatternFill("solid", fgColor="305496")
-_TITLE_FONT = Font(bold=True, size=14, color="1F4E79")
-_SECTION_FONT = Font(bold=True, size=12, color="1F4E79")
-_CENTER = Alignment(horizontal="center", vertical="center")
 
 
 def _style_header_row(ws, row, n_cols):
@@ -70,7 +83,7 @@ def _write_dataframe(ws, df, start_row):
     _style_header_row(ws, row=start_row, n_cols=n_cols)
     data_start = start_row + 1
     data_end = start_row + len(df)
-    next_row = data_end + 2  # leave one blank row
+    next_row = data_end + 2  # one blank row of breathing room
     return start_row, data_start, data_end, next_row, n_cols
 
 
@@ -93,8 +106,8 @@ def _pie_chart(title, labels, values):
     chart.title = title
     chart.add_data(values, titles_from_data=False)
     chart.set_categories(labels)
-    chart.width = 14
-    chart.height = 9
+    chart.width = _CHART_WIDTH
+    chart.height = _CHART_HEIGHT
     chart.dataLabels = DataLabelList(showPercent=True)
     return chart
 
@@ -107,162 +120,195 @@ def _bar_chart(title, labels, values, horizontal=False):
     chart.legend = None
     chart.add_data(values, titles_from_data=False)
     chart.set_categories(labels)
-    chart.width = 18
-    chart.height = 10
+    chart.width = _CHART_WIDTH
+    chart.height = _CHART_HEIGHT
     return chart
 
 
 def _line_chart(title, labels, values_with_header):
     chart = LineChart()
     chart.title = title
+    chart.legend = None
     chart.add_data(values_with_header, titles_from_data=True)
     chart.set_categories(labels)
-    chart.width = 22
-    chart.height = 10
+    chart.width = _CHART_WIDTH
+    chart.height = _CHART_HEIGHT
     return chart
+
+
+def _format_numeric_cells(ws, rows, cols, number_format):
+    """Apply thousands separator + centered alignment to a numeric block."""
+    align = Alignment(horizontal="center", vertical="center")
+    for row in rows:
+        for col in cols:
+            cell = ws.cell(row=row, column=col)
+            cell.number_format = number_format
+            cell.alignment = align
 
 
 def _build_dashboard(wb, summary):
     ws = wb["Dashboard"]
-    ws["A1"] = "HR Reporting Dashboard"
-    ws["A1"].font = _TITLE_FONT
-    ws.merge_cells("A1:B1")
+    # Clean executive look: no gridlines.
+    ws.sheet_view.showGridLines = False
 
+    # Title bar.
+    ws.merge_cells("A1:O1")
+    title = ws["A1"]
+    title.value = "HR Reporting Dashboard"
+    title.font = _TITLE_FONT
+    title.alignment = Alignment(horizontal="left", vertical="center")
+
+    # ---------------- Executive KPIs (cols A-B) ----------------
     kpis = [
-        ("Reporting Population (employees with check-ins)",
-         summary.get("reporting_population", summary.get("total_employees"))),
-        ("Data Quality Score (0-100)", summary.get("data_quality_score", "n/a")),
-        ("Late Cases", summary["late_cases"]),
-        ("Total Late Minutes (Unexcused)", summary["total_late_minutes"]),
-        ("Approved Excuse Cases", summary["approved_excuse_cases"]),
-        ("Leave Cases", summary["leave_cases"]),
-        ("Missing Schedule Cases", summary["missing_schedule_cases"]),
-        ("Missing Check-Out Cases", summary["missing_check_out_cases"]),
-        ("Excused Delay Minutes", summary["excused_delay_minutes"]),
-        ("High Risk Employees", summary.get("high_risk_employees", 0)),
-        ("Orphan Attendance Records", summary.get("orphan_attendance_records", 0)),
-        ("Unscheduled Active Employees", summary.get("unscheduled_active_employees", 0)),
-        ("Duplicate Employee Names", summary.get("duplicate_employee_names", 0)),
-        ("Missing Employee IDs", summary.get("missing_employee_ids", 0)),
-        ("Invalid Punches", summary.get("invalid_punches_count", 0)),
-        ("Estimated Deduction (uncapped)", summary.get("total_estimated_deduction", 0)),
-        (
-            f"Estimated Deduction (capped at {MAX_MONTHLY_DEDUCTION:.0f}/employee)",
-            summary.get("total_deduction_capped", 0),
-        ),
-        ("Overtime Cases", summary.get("overtime_cases", 0)),
-        ("Total Overtime Hours", summary.get("total_overtime_hours", 0)),
-        ("Employees With Overtime", summary.get("employees_with_overtime", 0)),
-        ("Avg Overtime Min / Case", summary.get("avg_overtime_minutes", 0)),
+        ("Reporting Population",
+         summary.get("reporting_population", summary.get("total_employees", 0)),
+         "#,##0"),
+        ("Data Quality Score", summary.get("data_quality_score", 0), "0.0"),
+        ("Late Cases", summary["late_cases"], "#,##0"),
+        ("Total Late Minutes (Unexcused)", summary["total_late_minutes"], "#,##0"),
+        ("Approved Excuse Cases", summary["approved_excuse_cases"], "#,##0"),
+        ("Leave Cases", summary["leave_cases"], "#,##0"),
+        ("Missing Schedule Cases", summary["missing_schedule_cases"], "#,##0"),
+        ("Missing Check-Out Cases", summary["missing_check_out_cases"], "#,##0"),
+        ("High Risk Employees", summary.get("high_risk_employees", 0), "#,##0"),
+        ("Excluded Employees", summary.get("excluded_employee_count", 0), "#,##0"),
+        ("Estimated Deduction (capped)", summary.get("total_deduction_capped", 0),
+         "#,##0.00"),
+        ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
+        ("Total Overtime Hours", summary.get("total_overtime_hours", 0), "0.0"),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
     _style_header_row(ws, row=3, n_cols=2)
-    for i, (label, value) in enumerate(kpis, start=4):
+    centered = Alignment(horizontal="center", vertical="center")
+    for i, (label, value, fmt) in enumerate(kpis, start=4):
         ws.cell(row=i, column=1, value=label)
-        ws.cell(row=i, column=2, value=value)
+        cell = ws.cell(row=i, column=2, value=value)
+        cell.number_format = fmt
+        cell.alignment = centered
 
-    next_row = 4 + len(kpis) + 1
+    # ---------------- Backing tables (placed below the charts) ----------------
+    # Each chart is 13cm x 7cm (~18 rows tall) anchored at row 3 / row 22,
+    # so the chart grid spans roughly rows 3-40. Data tables start safely
+    # below that.
+    DATA_START = 42
+    section_label = ws.cell(row=DATA_START, column=1, value="Underlying Data")
+    section_label.font = _SECTION_FONT
 
-    # Status breakdown table + pie chart anchored to its right.
-    ws.cell(row=next_row, column=1, value="Attendance Status Breakdown").font = _SECTION_FONT
-    next_row += 1
-    header_row, status_start, status_end, next_row, _ = _write_dataframe(
-        ws, summary["status_summary"], next_row
+    # Attendance Status table (drives Chart 1).
+    ws.cell(row=DATA_START + 1, column=1,
+            value="Attendance Status").font = _SECTION_FONT
+    status_df = summary["status_summary"]
+    _, status_data_start, status_data_end, status_next, status_n_cols = _write_dataframe(
+        ws, status_df, DATA_START + 2
     )
-    pie_labels = Reference(ws, min_col=1, min_row=status_start, max_row=status_end)
-    pie_values = Reference(ws, min_col=2, min_row=status_start, max_row=status_end)
+    _format_numeric_cells(
+        ws,
+        rows=range(status_data_start, status_data_end + 1),
+        cols=range(2, status_n_cols + 1),
+        number_format="#,##0",
+    )
+
+    # Top Overtime table (simplified). Drives Chart 4.
+    top_overtime_full = summary.get("top_overtime_employees")
+    if top_overtime_full is not None and not top_overtime_full.empty:
+        simplified_overtime = top_overtime_full[[
+            "Employee ID", "First Name",
+            "total_overtime_minutes", "total_overtime_hours",
+        ]].head(10).copy()
+    else:
+        simplified_overtime = pd.DataFrame(columns=[
+            "Employee ID", "First Name",
+            "total_overtime_minutes", "total_overtime_hours",
+        ])
+    ws.cell(row=status_next, column=1,
+            value="Top Overtime Employees").font = _SECTION_FONT
+    _, ot_data_start, ot_data_end, _, _ = _write_dataframe(
+        ws, simplified_overtime, status_next + 1
+    )
+    if not simplified_overtime.empty:
+        # Employee ID col 1 and total_overtime_minutes col 3 use integer
+        # thousands format; total_overtime_hours col 4 uses one decimal.
+        _format_numeric_cells(
+            ws,
+            rows=range(ot_data_start, ot_data_end + 1),
+            cols=[1, 3],
+            number_format="#,##0",
+        )
+        _format_numeric_cells(
+            ws,
+            rows=range(ot_data_start, ot_data_end + 1),
+            cols=[4],
+            number_format="0.0",
+        )
+
+    # ---------------- Charts: 2x2 grid (anchors leave visual buffer) ----------------
+    # Layout:
+    #   C3   K3
+    #   C22  K22
+    # Each chart 13cm x 7cm leaves a column/row of breathing room between
+    # neighbours and above the underlying-data section that starts at row 42.
+
+    # Chart 1 (top-left): Attendance Status pie.
+    pie_labels = Reference(ws, min_col=1,
+                           min_row=status_data_start, max_row=status_data_end)
+    pie_values = Reference(ws, min_col=2,
+                           min_row=status_data_start, max_row=status_data_end)
     ws.add_chart(
         _pie_chart("Attendance Status Breakdown", pie_labels, pie_values),
-        f"E{header_row - 1}",
+        "C3",
     )
 
-    # Excused vs Unexcused table + bar chart.
-    ws.cell(row=next_row, column=1, value="Excused vs Unexcused").font = _SECTION_FONT
-    next_row += 1
-    header_row, evu_start, evu_end, next_row, _ = _write_dataframe(
-        ws, summary["excused_vs_unexcused"], next_row
-    )
-    evu_labels = Reference(ws, min_col=1, min_row=evu_start, max_row=evu_end)
-    evu_values = Reference(ws, min_col=2, min_row=evu_start, max_row=evu_end)
-    ws.add_chart(
-        _bar_chart("Excused vs Unexcused (minutes)", evu_labels, evu_values),
-        f"E{header_row - 1}",
-    )
-
-    # Top 10 Late Employees bar chart -- references Employee Summary sheet.
-    emp_ws = wb["Employee Summary"]
-    if emp_ws.max_row > 1:
-        n_rows = min(10, emp_ws.max_row - 1)
-        last_row = 1 + n_rows
-        # Employee Summary cols (1-based): 1=Employee ID, 2=First Name,
-        # 3=total_late_minutes, 4=late_count, ... Plot First Name -> minutes.
-        labels = Reference(emp_ws, min_col=2, min_row=2, max_row=last_row)
-        values = Reference(emp_ws, min_col=3, min_row=2, max_row=last_row)
-        ws.cell(row=next_row, column=1, value="Top 10 Late Employees").font = _SECTION_FONT
-        ws.add_chart(
-            _bar_chart(
-                "Top 10 Late Employees (Unexcused Minutes)",
-                labels, values, horizontal=True,
-            ),
-            f"A{next_row + 1}",
-        )
-        next_row += 22
-
-    # Daily Trend line chart -- references Daily Trend sheet.
+    # Chart 2 (top-right): Daily Late Trend (references Daily Trend sheet).
     if "Daily Trend" in wb.sheetnames:
         trend_ws = wb["Daily Trend"]
         if trend_ws.max_row > 1:
-            last_row = trend_ws.max_row
             # Daily Trend cols: 1=Date, 2=total_records, 3=late_cases, ...
-            labels = Reference(trend_ws, min_col=1, min_row=2, max_row=last_row)
-            values = Reference(trend_ws, min_col=3, min_row=1, max_row=last_row)
-            ws.cell(row=next_row - 22, column=13, value="Daily Trend").font = _SECTION_FONT
+            trend_labels = Reference(
+                trend_ws, min_col=1, min_row=2, max_row=trend_ws.max_row
+            )
+            trend_values = Reference(
+                trend_ws, min_col=3, min_row=1, max_row=trend_ws.max_row
+            )
             ws.add_chart(
-                _line_chart("Daily Trend: Late Cases", labels, values),
-                f"M{next_row - 21}",
+                _line_chart("Daily Late Trend", trend_labels, trend_values),
+                "K3",
             )
 
-    # Overtime Summary section + Top Overtime Employees chart.
-    top_overtime = summary.get("top_overtime_employees")
-    if top_overtime is not None and not top_overtime.empty:
-        ws.cell(row=next_row, column=1,
-                value="Overtime Summary").font = _SECTION_FONT
-        next_row += 1
-        header_row, ot_start, ot_end, next_row, _ = _write_dataframe(
-            ws, top_overtime.head(10), next_row
-        )
-        # Chart: First Name (col 2) vs total_overtime_minutes (col 4).
-        labels = Reference(ws, min_col=2, min_row=ot_start, max_row=ot_end)
-        values = Reference(ws, min_col=4, min_row=ot_start, max_row=ot_end)
+    # Chart 3 (bottom-left): Top Late Employees (references Employee Summary).
+    emp_ws = wb["Employee Summary"]
+    if emp_ws.max_row > 1:
+        n_late = min(10, emp_ws.max_row - 1)
+        # Employee Summary cols: 1=Employee ID, 2=First Name,
+        # 3=total_late_minutes, ...
+        late_labels = Reference(emp_ws, min_col=2, min_row=2, max_row=1 + n_late)
+        late_values = Reference(emp_ws, min_col=3, min_row=2, max_row=1 + n_late)
         ws.add_chart(
-            _bar_chart(
-                "Top Overtime Employees (Minutes)",
-                labels, values, horizontal=True,
-            ),
-            f"E{header_row - 1}",
+            _bar_chart("Top Late Employees", late_labels, late_values,
+                       horizontal=True),
+            "C22",
         )
 
-    # Employee Reconciliation section -- makes the headline count auditable.
-    reconciliation = summary.get("employee_reconciliation")
-    if reconciliation is not None and not reconciliation.empty:
-        ws.cell(row=next_row, column=1,
-                value="Employee Reconciliation").font = _SECTION_FONT
-        next_row += 1
-        ws.cell(
-            row=next_row, column=1,
-            value=(
-                "Reporting Population is what this report publishes. The "
-                "other rows explain why it can differ from Odoo / BioTime."
-            ),
+    # Chart 4 (bottom-right): Top Overtime Employees.
+    if ot_data_end >= ot_data_start and not simplified_overtime.empty:
+        ot_labels = Reference(ws, min_col=2,
+                              min_row=ot_data_start, max_row=ot_data_end)
+        ot_values = Reference(ws, min_col=3,
+                              min_row=ot_data_start, max_row=ot_data_end)
+        ws.add_chart(
+            _bar_chart("Top Overtime Employees", ot_labels, ot_values,
+                       horizontal=True),
+            "K22",
         )
-        next_row += 2
-        _, _, _, next_row, _ = _write_dataframe(ws, reconciliation, next_row)
 
-    ws.column_dimensions["A"].width = 42
-    ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 38
-    ws.column_dimensions["D"].width = 70
+    # ---------------- Column widths + freeze ----------------
+    ws.column_dimensions["A"].width = 38
+    ws.column_dimensions["B"].width = 18
+    for letter in ("C", "D", "E", "F", "G", "H", "I",
+                   "J", "K", "L", "M", "N", "O", "P", "Q"):
+        ws.column_dimensions[letter].width = 11
+    # Pin the title row and KPI header so they stay visible when scrolling.
+    ws.freeze_panes = "A4"
 
 
 def export_report(summary, daily):
@@ -276,7 +322,7 @@ def export_report(summary, daily):
     _build_data_sheet(wb.create_sheet("Daily Attendance"), daily)
     _build_data_sheet(wb.create_sheet("Daily Trend"), summary.get("daily_trend"))
 
-    # Optional sheets -- only added when data is available.
+    # Optional sheets -- only added when the source data supplied them.
     missing_punches = summary.get("missing_punch_summary")
     if missing_punches is not None and not missing_punches.empty:
         _build_data_sheet(wb.create_sheet("Missing Punches"), missing_punches)
@@ -314,6 +360,12 @@ def export_report(summary, daily):
         _build_data_sheet(
             wb.create_sheet("Excluded Employees"), excluded_summary
         )
+
+    # High-level reconciliation table lives on its own sheet so the
+    # Dashboard stays uncluttered.
+    reconciliation = summary.get("employee_reconciliation")
+    if reconciliation is not None and not reconciliation.empty:
+        _build_data_sheet(wb.create_sheet("Reconciliation"), reconciliation)
 
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)
