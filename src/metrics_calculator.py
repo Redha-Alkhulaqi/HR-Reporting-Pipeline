@@ -34,10 +34,17 @@ def classify_risk(minutes):
 def calculate_metrics(df, schedules_df):
     # Build a name -> shift-start-HH:MM lookup from the Odoo resources file.
     schedules = schedules_df[["Name", "Working Time"]].copy()
+
+    # Strip whitespace on both sides of the join so subtle name variants
+    # ("NAME" vs "NAME ") do not split one employee into two groups or
+    # break the schedules lookup.
+    schedules["Name"] = schedules["Name"].astype(str).str.strip()
     schedules["Shift Start"] = schedules["Working Time"].apply(extract_shift_start)
+
     name_to_shift = schedules.set_index("Name")["Shift Start"].to_dict()
 
-    check_ins = df[df["Punch State"] == "Check In"]
+    check_ins = df[df["Punch State"] == "Check In"].copy()
+    check_ins["First Name"] = check_ins["First Name"].astype(str).str.strip()
 
     # First check-in per employee per day. Punch Time is a zero-padded
     # HH:MM:SS string, so a lexical min is also the chronological earliest.
