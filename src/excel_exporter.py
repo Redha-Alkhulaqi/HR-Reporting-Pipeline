@@ -2,7 +2,7 @@
 
 Sheets:
 - Dashboard           : KPIs, status / excused tables, embedded charts.
-- Employee Summary    : per-employee late aggregates + risk tier.
+- Employee Summary    : per-employee late + risk + payroll aggregates.
 - Daily Attendance    : the full daily DataFrame with every classified row.
 - Daily Trend         : per-day counts and unexcused minutes.
 - Missing Punches     : days with a Check In but no Check Out (optional).
@@ -10,8 +10,9 @@ Sheets:
                         the source data exposed a Department column).
 
 Data sheets get bold blue headers, frozen header row, auto-filter, and
-readable column widths. Dashboard hosts pie, bar, and line charts that
-reference the corresponding data tables.
+readable column widths. Files are written under
+REPORT_OUTPUT_DIR/YYYY-MM/hr_report_YYYYMMDD_HHMMSS.xlsx so each month
+is naturally archived.
 """
 from datetime import datetime
 
@@ -22,7 +23,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from config import REPORT_OUTPUT_DIR
+from config import MAX_MONTHLY_DEDUCTION, REPORT_OUTPUT_DIR
 
 
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -129,6 +130,12 @@ def _build_dashboard(wb, summary):
         ("Missing Schedule Cases", summary["missing_schedule_cases"]),
         ("Missing Check-Out Cases", summary["missing_check_out_cases"]),
         ("Excused Delay Minutes", summary["excused_delay_minutes"]),
+        ("High Risk Employees", summary.get("high_risk_employees", 0)),
+        ("Estimated Deduction (uncapped)", summary.get("total_estimated_deduction", 0)),
+        (
+            f"Estimated Deduction (capped at {MAX_MONTHLY_DEDUCTION:.0f}/employee)",
+            summary.get("total_deduction_capped", 0),
+        ),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -165,14 +172,14 @@ def _build_dashboard(wb, summary):
         f"E{header_row - 1}",
     )
 
-    # Top 10 Late Employees bar chart — references Employee Summary sheet.
+    # Top 10 Late Employees bar chart -- references Employee Summary sheet.
     emp_ws = wb["Employee Summary"]
     if emp_ws.max_row > 1:
         n_rows = min(10, emp_ws.max_row - 1)
         last_row = 1 + n_rows
-        # Employee Summary cols: Employee ID, late_count, total_late_minutes,
-        # avg_late_minutes, risk_level. Plot Employee ID -> total_late_minutes.
-        labels = Reference(emp_ws, min_col=1, min_row=2, max_row=last_row)
+        # Employee Summary cols (1-based): 1=Employee ID, 2=First Name,
+        # 3=total_late_minutes, 4=late_count, ... Plot First Name -> minutes.
+        labels = Reference(emp_ws, min_col=2, min_row=2, max_row=last_row)
         values = Reference(emp_ws, min_col=3, min_row=2, max_row=last_row)
         ws.cell(row=next_row, column=1, value="Top 10 Late Employees").font = _SECTION_FONT
         ws.add_chart(
@@ -184,14 +191,12 @@ def _build_dashboard(wb, summary):
         )
         next_row += 22
 
-    # Daily Trend line chart — references Daily Trend sheet.
+    # Daily Trend line chart -- references Daily Trend sheet.
     if "Daily Trend" in wb.sheetnames:
         trend_ws = wb["Daily Trend"]
         if trend_ws.max_row > 1:
             last_row = trend_ws.max_row
-            # Daily Trend cols: Date, total_records, late_cases,
-            # approved_excuse_cases, leave_cases, missing_schedule_cases,
-            # total_unexcused_delay_minutes. Plot late_cases (col 3) over Date.
+            # Daily Trend cols: 1=Date, 2=total_records, 3=late_cases, ...
             labels = Reference(trend_ws, min_col=1, min_row=2, max_row=last_row)
             values = Reference(trend_ws, min_col=3, min_row=1, max_row=last_row)
             ws.cell(row=next_row - 22, column=13, value="Daily Trend").font = _SECTION_FONT
@@ -200,7 +205,7 @@ def _build_dashboard(wb, summary):
                 f"M{next_row - 21}",
             )
 
-    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["A"].width = 42
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 24
     ws.column_dimensions["D"].width = 24
@@ -217,7 +222,7 @@ def export_report(summary, daily):
     _build_data_sheet(wb.create_sheet("Daily Attendance"), daily)
     _build_data_sheet(wb.create_sheet("Daily Trend"), summary.get("daily_trend"))
 
-    # Optional sheets — only added when data is available.
+    # Optional sheets -- only added when data is available.
     missing_punches = summary.get("missing_punch_summary")
     if missing_punches is not None and not missing_punches.empty:
         _build_data_sheet(wb.create_sheet("Missing Punches"), missing_punches)
@@ -229,8 +234,10 @@ def export_report(summary, daily):
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)
 
-    REPORT_OUTPUT_DIR.mkdir(exist_ok=True)
-    filename = REPORT_OUTPUT_DIR / f"hr_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    now = datetime.now()
+    monthly_dir = REPORT_OUTPUT_DIR / now.strftime("%Y-%m")
+    monthly_dir.mkdir(parents=True, exist_ok=True)
+    filename = monthly_dir / f"hr_report_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
     wb.save(filename)
 
     print(f"Report saved: {filename}")

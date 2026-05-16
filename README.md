@@ -14,12 +14,21 @@ report.
 - Partial hourly excuse handling (overlap between the delay window and
   the approved excuse window).
 - Excused vs unexcused delay accounting.
-- Per-employee risk tiering (`Low / Medium / High Risk`).
+- Compound per-employee risk scoring (numeric `risk_score`,
+  `risk_level`, plus a human-readable `risk_reason`) based on late
+  frequency, unexcused minutes, missing check-outs, and repeated
+  excuses.
+- Configurable payroll deduction estimation (`LATE_MINUTE_COST`,
+  `MAX_MONTHLY_DEDUCTION`) with per-employee and pipeline totals.
 - Department-level aggregation when a Department column is detected.
 - Missing Check-Out detection (days with a Check In but no Check Out).
 - Daily attendance trend.
 - Multi-sheet Excel report with embedded dashboard charts.
-- Claude-ready Markdown brief documenting every section.
+- Claude-ready Markdown brief leading with an auto-generated Executive
+  Summary (highlights, concerns, risks, recommendations, action plan).
+- Validation layer that surfaces invalid dates, unexpected punch
+  states, duplicate rows, etc. via the log.
+- Output versioning under `outputs/YYYY-MM/`.
 
 ## Input Files
 
@@ -35,7 +44,7 @@ Place each new month's export in `data/` and re-run the pipeline.
 
 ## Output Files
 
-Written to `outputs/` (created if absent):
+Written to `outputs/YYYY-MM/` (created if absent):
 
 - `hr_report_YYYYMMDD_HHMMSS.xlsx` — multi-sheet Excel report:
   - **Dashboard** — KPIs, status / excused tables, charts.
@@ -111,6 +120,8 @@ The script is CWD-independent (paths are resolved from `PROJECT_ROOT`).
 
 ## Documentation
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — pipeline flow,
+  modules, calculations, output structure, future roadmap.
 - [HR_REPORTING_RULES_MASTER.md](HR_REPORTING_RULES_MASTER.md) — master
   reporting rules (lateness, leaves, status priorities).
 - [MONTHLY_HR_REPORTING_WORKFLOW.md](MONTHLY_HR_REPORTING_WORKFLOW.md) —

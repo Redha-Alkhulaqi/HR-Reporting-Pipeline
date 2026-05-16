@@ -1,22 +1,30 @@
 """Write the Claude-facing monthly HR Markdown input.
 
 Sections (in order):
-   1. Summary KPIs
-   2. Attendance Status Breakdown
-   3. Excused vs Unexcused Analysis
-   4. Daily Trend
-   5. Top Late Employees
-   6. Department Summary           (only when department data is present)
-   7. Approved Excuse Records
-   8. Missing Punch Analysis
-   9. Employees Missing Working Schedule
-  10. Late Attendance Records
-  11. Business Logic Notes
-  12. Instructions for Claude
+   1. Executive Summary           (highlights, concerns, risks,
+                                   recommendations, action plan)
+   2. Summary KPIs
+   3. Attendance Status Breakdown
+   4. Excused vs Unexcused Analysis
+   5. Daily Trend
+   6. Top Late Employees          (full Employee Summary, includes
+                                   risk_score / risk_reason / deductions)
+   7. Department Summary          (only when department data is present)
+   8. Approved Excuse Records
+   9. Missing Punch Analysis
+  10. Employees Missing Working Schedule
+  11. Late Attendance Records
+  12. Business Logic Notes
+  13. Instructions for Claude
+
+Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
+so each month is naturally archived.
 """
+from datetime import datetime
+
 import pandas as pd
 
-from config import REPORT_OUTPUT_DIR
+from config import MAX_MONTHLY_DEDUCTION, REPORT_OUTPUT_DIR
 
 
 _BUSINESS_LOGIC_NOTES = """## Business Logic Notes
@@ -39,6 +47,11 @@ _BUSINESS_LOGIC_NOTES = """## Business Logic Notes
 - Missing Punch flags days that recorded a Check In but no Check Out.
   Per HR_REPORTING_RULES_MASTER rule 8, treat these as Missing Punch
   only after attendance is finalized.
+- Risk scoring is COMPOUND: late_count, total unexcused minutes,
+  missing check-outs, and repeated excuses each contribute capped
+  points. risk_level bands the resulting risk_score.
+- estimated_deduction = total_late_minutes * LATE_MINUTE_COST.
+  deduction_capped = min(estimated_deduction, MAX_MONTHLY_DEDUCTION).
 - attendance_status values: Late, On Time, Approved Excuse, Leave,
   Missing Schedule. late_cases and total_late_minutes count only Late
   rows; excused minutes never flow into total_late_minutes.
@@ -46,22 +59,97 @@ _BUSINESS_LOGIC_NOTES = """## Business Logic Notes
 
 _INSTRUCTIONS = """## Instructions for Claude
 
-Please generate a professional monthly HR report based on the data above.
+Use the Executive Summary above as the lead, then expand each section
+with detail drawn from the tables below. The final report should
+include:
 
-The report should include:
 1. Executive Summary
 2. Key Attendance KPIs
-3. Late Arrival Analysis
+3. Late Arrival Analysis (with department breakdown if available)
 4. Approved Excuse vs Unexcused Late Analysis
 5. Leave and Permission Patterns
-6. Department Comparison (if department data is provided)
-7. Daily Attendance Trend
-8. Missing Punch and Missing Schedule Manual Review Items
-9. Employee Attendance Risks
+6. Daily Attendance Trend
+7. Missing Punch and Missing Schedule Manual Review Items
+8. Employee Attendance Risks (cite risk_score and risk_reason)
+9. Payroll Impact (use estimated_deduction / deduction_capped totals)
 10. HR Recommendations
 11. Action Plan for Next Month
 
 Tone: professional, concise, suitable for HR management.
+"""
+
+
+def _build_executive_summary(metrics):
+    total_emp = metrics["total_employees"]
+    late = metrics["late_cases"]
+    late_min = metrics["total_late_minutes"]
+    excused = metrics["excused_delay_minutes"]
+    missing_co = metrics["missing_check_out_cases"]
+    missing_sch = metrics["missing_schedule_cases"]
+    leave = metrics["leave_cases"]
+    excuse_cases = metrics["approved_excuse_cases"]
+    high_risk = metrics.get("high_risk_employees", 0)
+    dep = metrics.get("total_estimated_deduction", 0.0)
+    dep_capped = metrics.get("total_deduction_capped", 0.0)
+
+    employee_summary = metrics.get("employee_summary")
+    if employee_summary is not None and not employee_summary.empty:
+        top = employee_summary.iloc[0]
+        top_late_line = (
+            f"**{top['First Name']}** "
+            f"({int(top['total_late_minutes'])} unexcused min, "
+            f"risk score {int(top['risk_score'])}, {top['risk_level']})"
+        )
+    else:
+        top_late_line = "_none_"
+
+    hours = late_min // 60
+    minutes = late_min % 60
+
+    return f"""## Executive Summary
+
+### Executive Highlights
+- Workforce covered: **{total_emp}** employees.
+- **{late}** late day(s) totaling **{late_min}** unexcused minutes
+  ({hours}h {minutes}m).
+- Approved excuses absorbed **{excused}** minutes of delay across
+  **{excuse_cases}** day(s).
+- **{leave}** day(s) classified as Leave.
+- Top late employee: {top_late_line}.
+
+### Top Concerns
+- **{high_risk}** employee(s) flagged as High Risk by the compound
+  scoring (late frequency, unexcused minutes, missing check-outs,
+  repeated excuses).
+- **{missing_co}** day(s) recorded a Check In but no Check Out --
+  resolve with operations before finalizing payroll.
+- **{missing_sch}** day(s) belong to employees missing from the Odoo
+  resources export; lateness could not be computed for them.
+
+### Operational Risks
+- Repeated lateness is concentrated in the top names of the Top Late
+  Employees table; their cumulative impact dominates the payroll
+  estimate.
+- Missing check-outs may indicate device sync gaps or unfinalized days;
+  surface to BioTime / floor managers and re-run when stabilized.
+
+### HR Recommendations
+- Hold one-to-one conversations with High Risk employees and discuss
+  underlying causes (commute, shift fit, recurring excuses).
+- Ensure every active employee has a Working Time assigned in Odoo so
+  the Missing Schedule count drops to zero next month.
+- Reconcile the {missing_co} Missing Check-Out day(s) before payroll cut.
+
+### Payroll Impact
+- Estimated payroll deduction (uncapped): **{dep:.2f}**.
+- Estimated payroll deduction (after the **{MAX_MONTHLY_DEDUCTION:.0f}**
+  per-employee monthly cap): **{dep_capped:.2f}**.
+
+### Action Plan for Next Month
+1. Schedule one-to-ones with High Risk employees within the first week.
+2. Close out Missing Check-Out cases and finalize the prior month.
+3. Add the Missing Schedule employees to Odoo resources.
+4. Re-run this pipeline mid-month for an early-warning check.
 """
 
 
@@ -75,8 +163,10 @@ def _write_section(f, title, df, empty_message, head=None):
 
 
 def generate_ai_input_file(metrics, attendance_daily):
-    REPORT_OUTPUT_DIR.mkdir(exist_ok=True)
-    file_path = REPORT_OUTPUT_DIR / "claude_hr_report_input.md"
+    now = datetime.now()
+    monthly_dir = REPORT_OUTPUT_DIR / now.strftime("%Y-%m")
+    monthly_dir.mkdir(parents=True, exist_ok=True)
+    file_path = monthly_dir / "claude_hr_report_input.md"
 
     daily = attendance_daily
     late_rows = daily[daily["attendance_status"] == "Late"]
@@ -92,7 +182,9 @@ def generate_ai_input_file(metrics, attendance_daily):
     with open(file_path, "w", encoding="utf-8") as f:
         f.write("# Monthly HR Attendance Report Input\n\n")
 
-        f.write("## Summary KPIs\n")
+        f.write(_build_executive_summary(metrics))
+
+        f.write("\n## Summary KPIs\n")
         for key, value in metrics.items():
             # Skip DataFrames (rendered in their own sections) and Nones.
             if isinstance(value, pd.DataFrame) or value is None:
@@ -114,10 +206,8 @@ def generate_ai_input_file(metrics, attendance_daily):
         _write_section(
             f, "Top Late Employees",
             metrics.get("employee_summary"), "No late employees found.",
-            head=20,
         )
 
-        # Department Summary — only when source data exposed a department col.
         dept_summary = metrics.get("department_summary")
         f.write("\n\n## Department Summary\n")
         if dept_summary is None or dept_summary.empty:
@@ -136,7 +226,6 @@ def generate_ai_input_file(metrics, attendance_daily):
             )
             f.write(excuse_rows.to_markdown(index=False))
 
-        # Missing Punch Analysis
         missing_punches = metrics.get("missing_punch_summary")
         f.write("\n\n## Missing Punch Analysis\n")
         if missing_punches is None or missing_punches.empty:

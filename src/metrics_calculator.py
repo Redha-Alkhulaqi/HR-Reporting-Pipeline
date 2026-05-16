@@ -13,8 +13,9 @@ Inputs
                   Status == "Approved" are honored.
 
 Output of calculate_metrics
-- summary : dict of KPI scalars plus these DataFrames (each may be None
-            or empty when its source data is unavailable):
+- summary : dict of KPI scalars (incl. payroll totals) plus these
+            DataFrames (each may be None / empty when source data is
+            unavailable):
               employee_summary, status_summary, excused_vs_unexcused,
               department_summary, missing_punch_summary, daily_trend.
 - daily   : DataFrame, one row per (Employee ID, Date). See schema below.
@@ -32,8 +33,12 @@ Daily DataFrame schema
   is_late (bool: attendance_status == "Late", kept for back compat),
   Check Out (HH:MM:SS or NaN  -- latest Check Out punch that day),
   has_check_out (bool), missing_check_out (bool),
-  Department (str or NaN  -- only populated when a department column
-              was detected in the source).
+  Department (str or NaN  -- only when source data exposed one).
+
+Employee Summary schema (per-employee, sorted by risk_score desc)
+  Employee ID, First Name, total_late_minutes, late_count,
+  avg_late_minutes, missing_checkout_count, excuse_count, risk_score,
+  risk_level, risk_reason, estimated_deduction, deduction_capped.
 
 Status classification (HR_REPORTING_RULES_MASTER rules 3, 5, 6)
 - Missing Schedule : employee absent from the resources export.
@@ -49,16 +54,29 @@ Status classification (HR_REPORTING_RULES_MASTER rules 3, 5, 6)
 - On Time          : everything else.
 
 Only Late rows contribute to late_cases / total_late_minutes.
+
+Risk scoring (compound, replaces the old minutes-only band)
+  risk_score = min(late_count*2, 40)
+             + min(total_late_minutes // 60, 20)   # capped hours bucket
+             + min(missing_checkout_count*2, 20)
+             + min(excuse_count, 5)
+  level is RISK_HIGH_THRESHOLD / RISK_MEDIUM_THRESHOLD bands of the
+  score. risk_reason is a short, human-readable text composed from the
+  contributing factors.
 """
 import re
 from datetime import datetime
 
 import pandas as pd
 
+from config import (
+    GRACE_MINUTES,
+    LATE_MINUTE_COST,
+    MAX_MONTHLY_DEDUCTION,
+    RISK_HIGH_THRESHOLD,
+    RISK_MEDIUM_THRESHOLD,
+)
 
-GRACE_MINUTES = 15                # Rule 6 grace period after shift start.
-RISK_HIGH_THRESHOLD = 1000        # Total late minutes that flag High Risk.
-RISK_MEDIUM_THRESHOLD = 500       # Total late minutes that flag Medium Risk.
 
 # Time Off Type values containing any of these substrings (case-insensitive)
 # are treated as approved EXCUSES (partial hourly permission). Every other
@@ -89,14 +107,6 @@ def _is_excuse_type(type_name):
     return any(kw.lower() in text for kw in _EXCUSE_KEYWORDS)
 
 
-def classify_risk(minutes):
-    if minutes >= RISK_HIGH_THRESHOLD:
-        return "High Risk"
-    if minutes >= RISK_MEDIUM_THRESHOLD:
-        return "Medium Risk"
-    return "Low Risk"
-
-
 def _delay_minutes(punch_time, shift_start):
     check_in = datetime.strptime(punch_time, "%H:%M:%S")
     shift_start_time = datetime.strptime(shift_start, "%H:%M")
@@ -108,6 +118,39 @@ def _find_column(df, candidates):
         if col in df.columns:
             return col
     return None
+
+
+def _compute_risk(late_count, total_late_minutes, missing_checkout_count, excuse_count):
+    """Return (risk_score, risk_level, risk_reason).
+
+    See the module docstring for the scoring weights and thresholds.
+    """
+    score = int(
+        min(late_count * 2, 40)
+        + min(total_late_minutes // 60, 20)
+        + min(missing_checkout_count * 2, 20)
+        + min(excuse_count, 5)
+    )
+
+    if score >= RISK_HIGH_THRESHOLD:
+        level = "High Risk"
+    elif score >= RISK_MEDIUM_THRESHOLD:
+        level = "Medium Risk"
+    else:
+        level = "Low Risk"
+
+    parts = []
+    if late_count:
+        parts.append(f"{late_count} late days")
+    if total_late_minutes:
+        parts.append(f"{total_late_minutes} unexcused min")
+    if missing_checkout_count:
+        parts.append(f"{missing_checkout_count} missing check-outs")
+    if excuse_count:
+        parts.append(f"{excuse_count} excused day(s)")
+    reason = "; ".join(parts) if parts else "no flags"
+
+    return score, level, reason
 
 
 def _build_shift_lookup(schedules_df):
@@ -267,21 +310,80 @@ def _attach_department(daily, df):
 
 
 def _build_employee_summary(daily):
-    late_rows = daily[daily["attendance_status"] == "Late"]
-    employee_summary = (
-        late_rows.groupby("Employee ID")
+    """Per-employee risk + payroll summary.
+
+    Covers every employee with at least one late day, missing check-out,
+    or approved excuse. Each row carries: aggregate counters, the compound
+    risk_score / risk_level / risk_reason, and estimated_deduction /
+    deduction_capped using the configured payroll rate.
+    """
+    per_emp = (
+        daily.groupby(["Employee ID", "First Name"])
         .agg(
             late_count=("is_late", "sum"),
             total_late_minutes=("unexcused_delay_minutes", "sum"),
-            avg_late_minutes=("unexcused_delay_minutes", "mean"),
+            missing_checkout_count=("missing_check_out", "sum"),
+            excuse_count=(
+                "attendance_status",
+                lambda s: int((s == "Approved Excuse").sum()),
+            ),
         )
         .reset_index()
-        .sort_values(by="total_late_minutes", ascending=False)
     )
-    employee_summary["risk_level"] = employee_summary["total_late_minutes"].apply(
-        classify_risk
+    per_emp = per_emp[
+        (per_emp["late_count"] > 0)
+        | (per_emp["missing_checkout_count"] > 0)
+        | (per_emp["excuse_count"] > 0)
+    ].copy()
+
+    if per_emp.empty:
+        return per_emp
+
+    per_emp["total_late_minutes"] = per_emp["total_late_minutes"].astype(int)
+    per_emp["late_count"] = per_emp["late_count"].astype(int)
+    per_emp["missing_checkout_count"] = per_emp["missing_checkout_count"].astype(int)
+    per_emp["excuse_count"] = per_emp["excuse_count"].astype(int)
+    per_emp["avg_late_minutes"] = per_emp.apply(
+        lambda r: int(r["total_late_minutes"] / r["late_count"])
+        if r["late_count"] else 0,
+        axis=1,
     )
-    return employee_summary
+
+    risk_df = per_emp.apply(
+        lambda r: pd.Series(
+            _compute_risk(
+                int(r["late_count"]),
+                int(r["total_late_minutes"]),
+                int(r["missing_checkout_count"]),
+                int(r["excuse_count"]),
+            ),
+            index=["risk_score", "risk_level", "risk_reason"],
+        ),
+        axis=1,
+    )
+    per_emp["risk_score"] = risk_df["risk_score"].astype(int)
+    per_emp["risk_level"] = risk_df["risk_level"]
+    per_emp["risk_reason"] = risk_df["risk_reason"]
+
+    per_emp["estimated_deduction"] = (
+        per_emp["total_late_minutes"] * LATE_MINUTE_COST
+    ).round(2)
+    per_emp["deduction_capped"] = (
+        per_emp["estimated_deduction"].clip(upper=MAX_MONTHLY_DEDUCTION).round(2)
+    )
+
+    column_order = [
+        "Employee ID", "First Name",
+        "total_late_minutes", "late_count", "avg_late_minutes",
+        "missing_checkout_count", "excuse_count",
+        "risk_score", "risk_level", "risk_reason",
+        "estimated_deduction", "deduction_capped",
+    ]
+    return (
+        per_emp[column_order]
+        .sort_values(by=["risk_score", "total_late_minutes"], ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def _build_status_summary(daily):
@@ -378,6 +480,15 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     missing_punch_summary = _build_missing_punch_summary(daily)
     daily_trend = _build_daily_trend(daily)
 
+    if employee_summary is not None and not employee_summary.empty:
+        total_est = float(employee_summary["estimated_deduction"].sum())
+        total_capped = float(employee_summary["deduction_capped"].sum())
+        high_risk_employees = int((employee_summary["risk_level"] == "High Risk").sum())
+    else:
+        total_est = 0.0
+        total_capped = 0.0
+        high_risk_employees = 0
+
     summary = {
         "total_employees": int(df["Employee ID"].nunique()),
         "late_cases": int(len(late_rows)),
@@ -387,6 +498,9 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "missing_schedule_cases": int((daily["attendance_status"] == "Missing Schedule").sum()),
         "missing_check_out_cases": int(daily["missing_check_out"].sum()),
         "excused_delay_minutes": int(daily["excused_delay_minutes"].sum()),
+        "total_estimated_deduction": round(total_est, 2),
+        "total_deduction_capped": round(total_capped, 2),
+        "high_risk_employees": high_risk_employees,
         "employee_summary": employee_summary,
         "status_summary": status_summary,
         "excused_vs_unexcused": excused_vs_unexcused,

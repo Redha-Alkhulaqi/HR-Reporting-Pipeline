@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-05-16 (Phase 3)
+- Added payroll deduction estimation (LATE_MINUTE_COST and
+  MAX_MONTHLY_DEDUCTION; per-employee and total figures on the
+  dashboard and in the Claude report).
+- Replaced minutes-only risk banding with a compound risk_score
+  (late frequency, unexcused minutes, missing check-outs, excuses),
+  plus risk_reason text on every employee row.
+- Added an auto-generated Executive Summary section to the Claude
+  Markdown brief (highlights, top concerns, operational risks,
+  HR recommendations, payroll impact, action plan).
+- Introduced a validators.py layer (required columns, empty file,
+  invalid dates, unexpected punch states, duplicate rows). Pipeline
+  fails fast with a clear message on hard errors and logs warnings
+  otherwise.
+- Improved structured logging: phase counts, validation summaries,
+  metric counters in one line.
+- Centralized every tunable in src/config.py (grace period, risk
+  thresholds, payroll rates, output dir).
+- Output versioning: reports now land under outputs/YYYY-MM/.
+- New docs/ARCHITECTURE.md describing pipeline flow, modules,
+  calculations, output structure, and roadmap.
+
 ## 2026-05-16
 - Added attendance status classification.
 - Added partial hourly excuse handling.
