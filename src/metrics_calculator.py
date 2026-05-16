@@ -95,6 +95,7 @@ import pandas as pd
 
 from config import (
     ALLOW_NAME_BASED_EXCLUSION_MATCH,
+    EARLY_LEAVE_GRACE_MINUTES,
     GRACE_MINUTES,
     LATE_MINUTE_COST,
     MAX_MONTHLY_DEDUCTION,
@@ -426,14 +427,19 @@ def _build_shift_end_lookup(schedules_df):
 
 
 def _classify_overtime_row(row):
-    """Per-row overtime computation.
+    """Per-row overtime AND early-leave computation.
 
     Returns a dict with Shift End DateTime, Check Out DateTime,
-    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status.
+    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status,
+    early_leave_minutes, early_leave_status.
 
     Night-shift handling: if Shift End < Shift Start in clock time, the
     shift crosses midnight and Shift End rolls to the next day. Same
     for Check Out vs Check In.
+
+    Overtime and early-leave are inverses against the same Shift End:
+    a positive `Check Out - Shift End` is the overtime branch; a negative
+    one is the early-leave branch. Each has its own grace window.
     """
     if not row["has_check_out"]:
         return {
@@ -443,6 +449,8 @@ def _classify_overtime_row(row):
             "scheduled_minutes": 0,
             "overtime_minutes": 0,
             "overtime_status": "Missing Check Out",
+            "early_leave_minutes": 0,
+            "early_leave_status": "Missing Check Out",
         }
     if row["missing_schedule"] or pd.isna(row["Shift End"]):
         return {
@@ -452,6 +460,8 @@ def _classify_overtime_row(row):
             "scheduled_minutes": 0,
             "overtime_minutes": 0,
             "overtime_status": "Missing Schedule",
+            "early_leave_minutes": 0,
+            "early_leave_status": "Missing Schedule",
         }
 
     date_str = row["Date"]
@@ -468,15 +478,22 @@ def _classify_overtime_row(row):
     worked = int((check_out_dt - check_in_dt).total_seconds() / 60)
     scheduled = int((shift_end_dt - shift_start_dt).total_seconds() / 60)
 
-    # Overtime = full delta past Shift End, but only when it exceeds the
-    # grace period AND clears the MIN_OVERTIME_MINUTES floor.
     delta = int((check_out_dt - shift_end_dt).total_seconds() / 60)
-    if delta <= OVERTIME_GRACE_MINUTES:
-        overtime, status = 0, "No Overtime"
-    elif delta < MIN_OVERTIME_MINUTES:
-        overtime, status = 0, "No Overtime"
+    if delta >= 0:
+        # On-time or overtime branch.
+        if delta <= OVERTIME_GRACE_MINUTES or delta < MIN_OVERTIME_MINUTES:
+            overtime, ot_status = 0, "No Overtime"
+        else:
+            overtime, ot_status = delta, "Overtime"
+        early_leave, el_status = 0, "Normal"
     else:
-        overtime, status = delta, "Overtime"
+        # Early-leave branch (Check Out is before Shift End).
+        overtime, ot_status = 0, "No Overtime"
+        gap = -delta
+        if gap > EARLY_LEAVE_GRACE_MINUTES:
+            early_leave, el_status = gap, "Early Leave"
+        else:
+            early_leave, el_status = 0, "Normal"
 
     return {
         "Shift End DateTime": shift_end_dt,
@@ -484,19 +501,23 @@ def _classify_overtime_row(row):
         "worked_minutes": worked,
         "scheduled_minutes": scheduled,
         "overtime_minutes": overtime,
-        "overtime_status": status,
+        "overtime_status": ot_status,
+        "early_leave_minutes": early_leave,
+        "early_leave_status": el_status,
     }
 
 
 def _attach_overtime_info(daily, shift_end_lookup):
     """Add Shift End, Shift End DateTime, Check Out DateTime,
-    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status."""
+    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status,
+    early_leave_minutes, early_leave_status."""
     daily["Shift End"] = daily["First Name"].map(shift_end_lookup)
 
     result_cols = [
         "Shift End DateTime", "Check Out DateTime",
         "worked_minutes", "scheduled_minutes",
         "overtime_minutes", "overtime_status",
+        "early_leave_minutes", "early_leave_status",
     ]
     rows = daily.apply(
         lambda r: pd.Series(_classify_overtime_row(r), index=result_cols),
@@ -507,6 +528,7 @@ def _attach_overtime_info(daily, shift_end_lookup):
     daily["worked_minutes"] = daily["worked_minutes"].astype(int)
     daily["scheduled_minutes"] = daily["scheduled_minutes"].astype(int)
     daily["overtime_minutes"] = daily["overtime_minutes"].astype(int)
+    daily["early_leave_minutes"] = daily["early_leave_minutes"].astype(int)
     return daily
 
 
@@ -632,6 +654,11 @@ def _build_employee_summary(daily):
                 lambda s: int((s == "Overtime").sum()),
             ),
             total_overtime_minutes=("overtime_minutes", "sum"),
+            early_leave_cases=(
+                "early_leave_status",
+                lambda s: int((s == "Early Leave").sum()),
+            ),
+            total_early_leave_minutes=("early_leave_minutes", "sum"),
             is_excluded=("is_excluded", "any"),
             exclusion_reason=("exclusion_reason", "first"),
             excluded_from_late=("excluded_from_late", "any"),
@@ -646,6 +673,7 @@ def _build_employee_summary(daily):
         | (per_emp["missing_checkout_count"] > 0)
         | (per_emp["excuse_count"] > 0)
         | (per_emp["overtime_cases"] > 0)
+        | (per_emp["early_leave_cases"] > 0)
         | (per_emp["is_excluded"])
     ].copy()
 
@@ -659,6 +687,8 @@ def _build_employee_summary(daily):
     per_emp["overtime_cases"] = per_emp["overtime_cases"].astype(int)
     per_emp["total_overtime_minutes"] = per_emp["total_overtime_minutes"].astype(int)
     per_emp["total_overtime_hours"] = (per_emp["total_overtime_minutes"] / 60).round(1)
+    per_emp["early_leave_cases"] = per_emp["early_leave_cases"].astype(int)
+    per_emp["total_early_leave_minutes"] = per_emp["total_early_leave_minutes"].astype(int)
     per_emp["avg_late_minutes"] = per_emp.apply(
         lambda r: int(r["total_late_minutes"] / r["late_count"])
         if r["late_count"] else 0,
@@ -703,6 +733,7 @@ def _build_employee_summary(daily):
         "total_late_minutes", "late_count", "avg_late_minutes",
         "missing_checkout_count", "excuse_count",
         "overtime_cases", "total_overtime_minutes", "total_overtime_hours",
+        "early_leave_cases", "total_early_leave_minutes",
         "risk_score", "risk_level", "risk_reason",
         "estimated_deduction", "deduction_capped",
         "is_excluded", "exclusion_reason",
@@ -793,6 +824,36 @@ def _build_daily_trend(daily):
     grp = _aggregate_status_counts(daily, "Date")
     grp["total_unexcused_delay_minutes"] = grp["total_unexcused_delay_minutes"].astype(int)
     return grp.sort_values("Date").reset_index(drop=True)
+
+
+def _build_top_early_leave_employees(daily):
+    """Per-employee early-leave aggregates, sorted by total minutes desc.
+
+    Early leave is a discipline-adjacent metric, so we honor the same
+    `excluded_from_late` flag used by the lateness KPIs.
+    """
+    el_rows = daily[
+        (daily["early_leave_status"] == "Early Leave")
+        & (~daily.get("excluded_from_late", False))
+    ]
+    if el_rows.empty:
+        return pd.DataFrame(
+            columns=[
+                "Employee ID", "First Name",
+                "early_leave_cases", "total_early_leave_minutes",
+            ]
+        )
+    top = (
+        el_rows.groupby(["Employee ID", "First Name"])
+        .agg(
+            early_leave_cases=("early_leave_minutes", "size"),
+            total_early_leave_minutes=("early_leave_minutes", "sum"),
+        )
+        .reset_index()
+        .sort_values("total_early_leave_minutes", ascending=False)
+    )
+    top["total_early_leave_minutes"] = top["total_early_leave_minutes"].astype(int)
+    return top.reset_index(drop=True)
 
 
 def _build_top_overtime_employees(daily):
@@ -1072,6 +1133,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     )
     employee_master = _build_employee_master(df, schedules_df, daily)
     top_overtime_employees = _build_top_overtime_employees(daily)
+    top_early_leave_employees = _build_top_early_leave_employees(daily)
 
     overtime_rows = daily[
         (daily["overtime_status"] == "Overtime")
@@ -1084,6 +1146,18 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     avg_overtime_minutes = (
         int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
     )
+
+    # Early-leave honors the same exclusion flag as the lateness KPIs.
+    early_leave_rows = daily[
+        (daily["early_leave_status"] == "Early Leave")
+        & (~daily["excluded_from_late"])
+    ]
+    early_leave_cases = int(len(early_leave_rows))
+    total_early_leave_minutes = int(early_leave_rows["early_leave_minutes"].sum())
+    employees_with_early_leave = (
+        int(early_leave_rows["Employee ID"].nunique()) if early_leave_cases else 0
+    )
+
     excluded_employees_summary = _build_excluded_employees_summary(daily, excluded_df)
 
     schedule_names = set(schedules_df["Name"].dropna().astype(str).str.strip())
@@ -1148,6 +1222,10 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "total_overtime_hours": total_overtime_hours,
         "employees_with_overtime": employees_with_overtime,
         "avg_overtime_minutes": avg_overtime_minutes,
+        # Early leave KPIs.
+        "early_leave_cases": early_leave_cases,
+        "total_early_leave_minutes": total_early_leave_minutes,
+        "employees_with_early_leave": employees_with_early_leave,
         # DataFrames.
         "employee_summary": employee_summary,
         "status_summary": status_summary,
@@ -1159,6 +1237,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "employee_reconciliation_details": reconciliation_details,
         "employee_master": employee_master,
         "top_overtime_employees": top_overtime_employees,
+        "top_early_leave_employees": top_early_leave_employees,
         "excluded_employees_summary": excluded_employees_summary,
         "excluded_employee_count": int(
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()

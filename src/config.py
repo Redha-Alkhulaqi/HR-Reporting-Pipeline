@@ -42,6 +42,10 @@ MAX_MONTHLY_DEDUCTION = float(os.getenv("MAX_MONTHLY_DEDUCTION", "500.0"))
 OVERTIME_GRACE_MINUTES = int(os.getenv("OVERTIME_GRACE_MINUTES", "15"))
 MIN_OVERTIME_MINUTES = int(os.getenv("MIN_OVERTIME_MINUTES", "30"))
 
+# Early-leave rule. A Check Out before Shift End counts as Early Leave
+# only when the gap exceeds this grace window.
+EARLY_LEAVE_GRACE_MINUTES = int(os.getenv("EARLY_LEAVE_GRACE_MINUTES", "10"))
+
 # Employee exclusions. When the exclusion file lacks an Employee ID for
 # a row, fall back to matching the row's normalized Employee Name
 # against the attendance file. Disable for stricter ID-only matching.

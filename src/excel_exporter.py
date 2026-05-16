@@ -28,6 +28,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -99,6 +100,66 @@ def _build_data_sheet(ws, df):
     if ws.max_row > 1:
         ws.auto_filter.ref = ws.dimensions
     _autosize_columns(ws)
+
+
+def _apply_daily_conditional_formatting(ws, df):
+    """Color-code each row in Daily Attendance by its dominant status.
+
+    Rules are applied in priority order with stopIfTrue=True so each
+    row gets exactly one fill, picking the most important condition.
+    Priority (highest first): Excluded, Leave, Approved Excuse, Late,
+    Early Leave, Missing Check Out, Overtime.
+    """
+    if df is None or df.empty:
+        return
+
+    cols = list(df.columns)
+    n_rows = len(df)
+    n_cols = len(cols)
+    last_col_letter = get_column_letter(n_cols)
+    range_str = f"A2:{last_col_letter}{n_rows + 1}"
+
+    def col_letter(name):
+        return get_column_letter(cols.index(name) + 1) if name in cols else None
+
+    is_late_L = col_letter("is_late")
+    unexcused_L = col_letter("unexcused_delay_minutes")
+    overtime_L = col_letter("overtime_minutes")
+    early_leave_L = col_letter("early_leave_minutes")
+    missing_co_L = col_letter("missing_check_out")
+    status_L = col_letter("attendance_status")
+    excluded_L = col_letter("is_excluded")
+
+    def _add(formula, fill_hex, font_hex="000000", bold=False):
+        ws.conditional_formatting.add(
+            range_str,
+            FormulaRule(
+                formula=[formula],
+                fill=PatternFill("solid", fgColor=fill_hex),
+                font=Font(bold=bold, color=font_hex),
+                stopIfTrue=True,
+            ),
+        )
+
+    # Priority order (highest first). The first matching rule wins per row.
+    if excluded_L:
+        _add(f"${excluded_L}2=TRUE", "C8A2C8")              # light violet
+    if status_L:
+        _add(f'${status_L}2="Leave"', "BFBFBF")             # gray
+        _add(f'${status_L}2="Approved Excuse"', "DDEBF7")   # light blue
+    if is_late_L and unexcused_L:
+        _add(
+            f"OR(${is_late_L}2=TRUE,${unexcused_L}2>0)",
+            "C00000", font_hex="FFFFFF", bold=True,         # red + white bold
+        )
+    if early_leave_L:
+        _add(f"${early_leave_L}2>0", "CC6600",
+             font_hex="FFFFFF")                              # dark orange
+    if missing_co_L:
+        _add(f"${missing_co_L}2=TRUE", "FFFF00", bold=True)  # yellow
+    if overtime_L:
+        _add(f"${overtime_L}2>0", "C6EFCE",
+             font_hex="006100")                              # green
 
 
 def _pie_chart(title, labels, values):
@@ -176,6 +237,8 @@ def _build_dashboard(wb, summary):
          "#,##0.00"),
         ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
         ("Total Overtime Hours", summary.get("total_overtime_hours", 0), "0.0"),
+        ("Early Leave Cases", summary.get("early_leave_cases", 0), "#,##0"),
+        ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -188,10 +251,10 @@ def _build_dashboard(wb, summary):
         cell.alignment = centered
 
     # ---------------- Backing tables (placed below the charts) ----------------
-    # Each chart is 13cm x 7cm (~18 rows tall) anchored at row 3 / row 22,
-    # so the chart grid spans roughly rows 3-40. Data tables start safely
-    # below that.
-    DATA_START = 42
+    # Each chart is 13cm x 7cm (~18 rows tall). Three chart rows anchored
+    # at rows 3 / 22 / 41 cover roughly rows 3-58, so data tables start
+    # safely at row 60.
+    DATA_START = 60
     section_label = ws.cell(row=DATA_START, column=1, value="Underlying Data")
     section_label.font = _SECTION_FONT
 
@@ -223,7 +286,7 @@ def _build_dashboard(wb, summary):
         ])
     ws.cell(row=status_next, column=1,
             value="Top Overtime Employees").font = _SECTION_FONT
-    _, ot_data_start, ot_data_end, _, _ = _write_dataframe(
+    _, ot_data_start, ot_data_end, ot_next, _ = _write_dataframe(
         ws, simplified_overtime, status_next + 1
     )
     if not simplified_overtime.empty:
@@ -240,6 +303,29 @@ def _build_dashboard(wb, summary):
             rows=range(ot_data_start, ot_data_end + 1),
             cols=[4],
             number_format="0.0",
+        )
+
+    # Top Early Leave table (simplified). Drives Chart 5.
+    top_el_full = summary.get("top_early_leave_employees")
+    if top_el_full is not None and not top_el_full.empty:
+        simplified_el = top_el_full[[
+            "Employee ID", "First Name", "total_early_leave_minutes",
+        ]].head(10).copy()
+    else:
+        simplified_el = pd.DataFrame(columns=[
+            "Employee ID", "First Name", "total_early_leave_minutes",
+        ])
+    ws.cell(row=ot_next, column=1,
+            value="Top Early Leave Employees").font = _SECTION_FONT
+    _, el_data_start, el_data_end, _, _ = _write_dataframe(
+        ws, simplified_el, ot_next + 1
+    )
+    if not simplified_el.empty:
+        _format_numeric_cells(
+            ws,
+            rows=range(el_data_start, el_data_end + 1),
+            cols=[1, 3],
+            number_format="#,##0",
         )
 
     # ---------------- Charts: 2x2 grid (anchors leave visual buffer) ----------------
@@ -301,6 +387,18 @@ def _build_dashboard(wb, summary):
             "K22",
         )
 
+    # Chart 5 (third row, left): Top Early Leave Employees.
+    if el_data_end >= el_data_start and not simplified_el.empty:
+        el_labels = Reference(ws, min_col=2,
+                              min_row=el_data_start, max_row=el_data_end)
+        el_values = Reference(ws, min_col=3,
+                              min_row=el_data_start, max_row=el_data_end)
+        ws.add_chart(
+            _bar_chart("Top Early Leave Employees", el_labels, el_values,
+                       horizontal=True),
+            "C41",
+        )
+
     # ---------------- Column widths + freeze ----------------
     ws.column_dimensions["A"].width = 38
     ws.column_dimensions["B"].width = 18
@@ -319,7 +417,9 @@ def export_report(summary, daily):
 
     # Always-present data sheets, in this tab order.
     _build_data_sheet(wb.create_sheet("Employee Summary"), summary["employee_summary"])
-    _build_data_sheet(wb.create_sheet("Daily Attendance"), daily)
+    daily_ws = wb.create_sheet("Daily Attendance")
+    _build_data_sheet(daily_ws, daily)
+    _apply_daily_conditional_formatting(daily_ws, daily)
     _build_data_sheet(wb.create_sheet("Daily Trend"), summary.get("daily_trend"))
 
     # Optional sheets -- only added when the source data supplied them.
@@ -352,6 +452,18 @@ def export_report(summary, daily):
                 "Check In", "Check Out", "Shift Start", "Shift End",
                 "worked_minutes", "scheduled_minutes",
                 "overtime_minutes", "overtime_status",
+            ]],
+        )
+
+    # Early Leave sheet -- only rows where the employee genuinely left early.
+    early_leave_rows = daily[daily.get("early_leave_status") == "Early Leave"]
+    if not early_leave_rows.empty:
+        _build_data_sheet(
+            wb.create_sheet("Early Leave"),
+            early_leave_rows[[
+                "Employee ID", "First Name", "Date",
+                "Check In", "Check Out", "Shift Start", "Shift End",
+                "early_leave_minutes", "early_leave_status",
             ]],
         )
 

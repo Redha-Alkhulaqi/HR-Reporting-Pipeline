@@ -17,14 +17,15 @@ Sections (in order):
                                    no schedule, anomalies)
   10. Excluded Employees          (policy exclusions from KPIs while
                                    operational data stays visible)
-  11. Overtime Analysis           (counts, hours, top overtime employees)
-  12. Department Summary          (only when department data is present)
-  13. Approved Excuse Records
-  14. Missing Punch Analysis
-  15. Employees Missing Working Schedule
-  16. Late Attendance Records
-  17. Business Logic Notes
-  18. Instructions for Claude
+  11. Early Leave Analysis        (counts, minutes, top early-leave employees)
+  12. Overtime Analysis           (counts, hours, top overtime employees)
+  13. Department Summary          (only when department data is present)
+  14. Approved Excuse Records
+  15. Missing Punch Analysis
+  16. Employees Missing Working Schedule
+  17. Late Attendance Records
+  18. Business Logic Notes
+  19. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -331,6 +332,29 @@ def generate_ai_input_file(metrics, attendance_daily):
             f.write("_No exclusions configured for this period._\n")
         else:
             f.write(excluded_summary.to_markdown(index=False))
+
+        f.write("\n\n## Early Leave Analysis\n")
+        el_cases = metrics.get("early_leave_cases", 0)
+        el_min = metrics.get("total_early_leave_minutes", 0)
+        el_emps = metrics.get("employees_with_early_leave", 0)
+        f.write(
+            f"- Early Leave cases: **{el_cases}**\n"
+            f"- Total early-leave minutes: **{el_min}** "
+            f"({el_min // 60}h {el_min % 60}m)\n"
+            f"- Employees with early leave: **{el_emps}**\n\n"
+        )
+        top_el = metrics.get("top_early_leave_employees")
+        if top_el is not None and not top_el.empty:
+            f.write("### Top Early Leave Employees\n")
+            f.write(top_el.head(20).to_markdown(index=False))
+        else:
+            f.write("_No early-leave days recorded this period._\n")
+        f.write(
+            "\n\n_Notes:_ A day counts as Early Leave when the gap "
+            "between the Check Out and the shift's Shift End exceeds "
+            "the configured grace window. Days with no Check Out or "
+            "no shift assignment are excluded.\n"
+        )
 
         f.write("\n\n## Overtime Analysis\n")
         ot_cases = metrics.get("overtime_cases", 0)

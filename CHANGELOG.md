@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-05-16 (Early leave + conditional formatting)
+- Added Early Leave detection with `EARLY_LEAVE_GRACE_MINUTES` (default
+  10) in `config.py`. A Check Out before Shift End counts as Early
+  Leave only when the gap exceeds the grace window.
+- Added daily columns `early_leave_minutes` and `early_leave_status`.
+  Status values: `Early Leave`, `Normal`, `Missing Check Out`,
+  `Missing Schedule`. Night-shift wraparound honored.
+- Extended overtime / early-leave classification: both are computed
+  in one pass against the same Shift End. Overtime status stays
+  unchanged when an employee leaves early, and vice versa.
+- Added summary KPIs: `early_leave_cases`,
+  `total_early_leave_minutes`, `employees_with_early_leave`, plus a
+  `top_early_leave_employees` DataFrame (honors `excluded_from_late`).
+- Extended `employee_summary` with `early_leave_cases` and
+  `total_early_leave_minutes`.
+- Excel: new Early Leave sheet, two new Dashboard KPIs
+  (`Early Leave Cases`, `Total Early Leave Minutes`), and a fifth
+  Dashboard chart (`Top Early Leave Employees`) anchored under the
+  existing 2x2 grid.
+- Excel conditional formatting on Daily Attendance: per-row coloring
+  by priority (Excluded > Leave > Approved Excuse > Late > Early
+  Leave > Missing Check Out > Overtime) using FormulaRule with
+  `stopIfTrue=True` so each row picks one color.
+- Claude markdown: new `## Early Leave Analysis` section with the
+  top early-leave employees table and the calculation notes.
+- Added `tests/test_early_leave.py` covering normal close-out, grace
+  threshold, beyond grace, missing check-out, missing schedule,
+  night-shift wraparound, and the overtime-vs-early-leave distinction
+  (7 new tests; 49 total).
+
 ## 2026-05-16 (Employee exclusion rules)
 - Added optional `data/excluded_employees.xlsx` input with columns
   `Employee ID, Employee Name, Exclusion Reason, Exclude From Late,
