@@ -1,7 +1,7 @@
 import logging
 
 from config import PROJECT_ROOT, LOG_LEVEL
-from data_loader import load_attendance_file
+from data_loader import load_attendance_file, load_working_schedule_file
 from report_generator import generate_report
 from excel_exporter import export_report
 from metrics_calculator import calculate_metrics
@@ -32,9 +32,11 @@ def main():
 
     try:
         df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
+        schedules_df = load_working_schedule_file(
+        PROJECT_ROOT / "data/Resources (resource.resource).xlsx")
         logger.info("Attendance file loaded")
 
-        summary, daily = calculate_metrics(df)
+        summary, daily = calculate_metrics(df, schedules_df)
         logger.info("Attendance data processed")
 
         generate_report(summary)
