@@ -4,18 +4,20 @@ Sections (in order):
    1. Executive Summary           (highlights, concerns, risks,
                                    recommendations, action plan)
    2. Summary KPIs
-   3. Attendance Status Breakdown
-   4. Excused vs Unexcused Analysis
-   5. Daily Trend
-   6. Top Late Employees          (full Employee Summary, includes
+   3. Employee Count Reconciliation  (auditable taxonomy; why our number
+                                      can differ from Odoo / BioTime)
+   4. Attendance Status Breakdown
+   5. Excused vs Unexcused Analysis
+   6. Daily Trend
+   7. Top Late Employees          (full Employee Summary, includes
                                    risk_score / risk_reason / deductions)
-   7. Department Summary          (only when department data is present)
-   8. Approved Excuse Records
-   9. Missing Punch Analysis
-  10. Employees Missing Working Schedule
-  11. Late Attendance Records
-  12. Business Logic Notes
-  13. Instructions for Claude
+   8. Department Summary          (only when department data is present)
+   9. Approved Excuse Records
+  10. Missing Punch Analysis
+  11. Employees Missing Working Schedule
+  12. Late Attendance Records
+  13. Business Logic Notes
+  14. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -162,6 +164,48 @@ def _write_section(f, title, df, empty_message, head=None):
     f.write(table.to_markdown(index=False))
 
 
+def _write_employee_count_reconciliation(f, metrics):
+    """Render the Employee Count Reconciliation section.
+
+    Explains why our headline employee number can diverge from Odoo /
+    BioTime and surfaces the reconciliation table built by
+    metrics_calculator.
+    """
+    reporting_population = metrics.get(
+        "reporting_population", metrics.get("total_employees", 0)
+    )
+    table = metrics.get("employee_reconciliation")
+
+    f.write("\n\n## Employee Count Reconciliation\n")
+    f.write(
+        f"The headline employee count in this report is **Reporting "
+        f"Population = {reporting_population}**. This number may differ "
+        "from other employee dashboards for these reasons:\n\n"
+    )
+    f.write(
+        "- **Odoo Employees screen** counts every Odoo-configured "
+        "employee (active + leave + recently created), regardless of "
+        "whether they punched. It can be larger than this report when "
+        "employees took the full month off, and smaller when the "
+        "attendance file still contains inactive / decommissioned IDs.\n"
+    )
+    f.write(
+        "- **BioTime dashboard** typically counts only currently active "
+        "terminal users; an export covering a closed period can include "
+        "more IDs than the live BioTime count.\n"
+    )
+    f.write(
+        "- **This pipeline** uses **Employees With Check-ins** as the "
+        "Reporting Population: the set of employees who actually punched "
+        "in during the exported period. That is the auditable number for "
+        "monthly HR reporting.\n\n"
+    )
+    if table is None or table.empty:
+        f.write("Reconciliation table not available.\n")
+    else:
+        f.write(table.to_markdown(index=False))
+
+
 def generate_ai_input_file(metrics, attendance_daily):
     now = datetime.now()
     monthly_dir = REPORT_OUTPUT_DIR / now.strftime("%Y-%m")
@@ -190,6 +234,8 @@ def generate_ai_input_file(metrics, attendance_daily):
             if isinstance(value, pd.DataFrame) or value is None:
                 continue
             f.write(f"- {key}: {value}\n")
+
+        _write_employee_count_reconciliation(f, metrics)
 
         _write_section(
             f, "Attendance Status Breakdown",

@@ -122,7 +122,8 @@ def _build_dashboard(wb, summary):
     ws.merge_cells("A1:B1")
 
     kpis = [
-        ("Total Employees", summary["total_employees"]),
+        ("Reporting Population (employees with check-ins)",
+         summary.get("reporting_population", summary.get("total_employees"))),
         ("Late Cases", summary["late_cases"]),
         ("Total Late Minutes (Unexcused)", summary["total_late_minutes"]),
         ("Approved Excuse Cases", summary["approved_excuse_cases"]),
@@ -205,10 +206,26 @@ def _build_dashboard(wb, summary):
                 f"M{next_row - 21}",
             )
 
+    # Employee Reconciliation section -- makes the headline count auditable.
+    reconciliation = summary.get("employee_reconciliation")
+    if reconciliation is not None and not reconciliation.empty:
+        ws.cell(row=next_row, column=1,
+                value="Employee Reconciliation").font = _SECTION_FONT
+        next_row += 1
+        ws.cell(
+            row=next_row, column=1,
+            value=(
+                "Reporting Population is what this report publishes. The "
+                "other rows explain why it can differ from Odoo / BioTime."
+            ),
+        )
+        next_row += 2
+        _, _, _, next_row, _ = _write_dataframe(ws, reconciliation, next_row)
+
     ws.column_dimensions["A"].width = 42
     ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 24
-    ws.column_dimensions["D"].width = 24
+    ws.column_dimensions["C"].width = 38
+    ws.column_dimensions["D"].width = 70
 
 
 def export_report(summary, daily):
@@ -230,6 +247,13 @@ def export_report(summary, daily):
     department_summary = summary.get("department_summary")
     if department_summary is not None and not department_summary.empty:
         _build_data_sheet(wb.create_sheet("Department Summary"), department_summary)
+
+    reconciliation_details = summary.get("employee_reconciliation_details")
+    if reconciliation_details is not None and not reconciliation_details.empty:
+        _build_data_sheet(
+            wb.create_sheet("Employee Reconciliation Details"),
+            reconciliation_details,
+        )
 
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)

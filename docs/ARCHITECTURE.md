@@ -66,6 +66,24 @@ data/                        src/                       outputs/YYYY-MM/
 | **8 — Missing punch** | Day has Check In but no Check Out | Flagged on `missing_check_out`; surfaced in report. |
 | **Schedule lookup** | Odoo `resource.resource` -> `Working Time` | Absent name → `Missing Schedule`. |
 
+## Employee Count Taxonomy
+
+A single "total employees" number is dangerously ambiguous, so the
+pipeline publishes five explicit counts (every one of them lives on the
+`summary` dict and on the Dashboard's Employee Reconciliation table):
+
+| Count | Source | Meaning |
+|---|---|---|
+| `attendance_file_employees` | `attendance_raw.xlsx` | Unique Employee IDs anywhere in the BioTime export (incl. inactive). |
+| `employees_with_checkins` | attendance Check In rows | Unique IDs that recorded at least one Check In during the period. |
+| `scheduled_employees` | Odoo `resource.resource` | Unique Names with a Working Time assignment. |
+| `employees_missing_schedule` | derived | Check-in employees absent from the Odoo resources export. |
+| `reporting_population` | derived (= `employees_with_checkins`) | The number we publish for this report. |
+
+`total_employees` is kept as a backward-compat alias of
+`reporting_population` and will be dropped once every consumer reads
+the explicit counts.
+
 ## Calculations
 
 ### Lateness
@@ -106,11 +124,13 @@ outputs/
     │   ├── Employee Summary   (per-employee risk + payroll)
     │   ├── Daily Attendance   (one row per employee-day)
     │   ├── Daily Trend        (one row per date)
-    │   ├── Missing Punches    (optional)
-    │   └── Department Summary (optional)
+    │   ├── Missing Punches                (optional)
+    │   ├── Department Summary             (optional)
+    │   └── Employee Reconciliation Details (per-ID audit table)
     └── claude_hr_report_input.md
         ├── Executive Summary
         ├── Summary KPIs
+        ├── Employee Count Reconciliation
         ├── Attendance / Excused breakdowns
         ├── Daily Trend
         ├── Top Late Employees

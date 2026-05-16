@@ -13,12 +13,29 @@ Inputs
                   Status == "Approved" are honored.
 
 Output of calculate_metrics
-- summary : dict of KPI scalars (incl. payroll totals) plus these
+- summary : dict of KPI scalars (incl. payroll totals and the explicit
+            employee-count taxonomy described below) plus these
             DataFrames (each may be None / empty when source data is
             unavailable):
               employee_summary, status_summary, excused_vs_unexcused,
-              department_summary, missing_punch_summary, daily_trend.
+              department_summary, missing_punch_summary, daily_trend,
+              employee_reconciliation, employee_reconciliation_details.
 - daily   : DataFrame, one row per (Employee ID, Date). See schema below.
+
+Employee-count taxonomy (auditable, never the bare `Employee ID.nunique`)
+- attendance_file_employees : every unique Employee ID anywhere in the
+                              BioTime export (incl. check-out / break
+                              punches and inactive IDs).
+- employees_with_checkins   : unique Employee IDs that recorded at
+                              least one Check In during the period.
+- scheduled_employees       : unique Name rows in the Odoo
+                              resource.resource export.
+- employees_missing_schedule: employees with a Check In whose name has
+                              no match in the Odoo resources export.
+- reporting_population      : the count we publish for this report
+                              (= employees_with_checkins for now).
+`total_employees` is kept as a backward-compat alias of
+reporting_population.
 
 Daily DataFrame schema
   Employee ID, First Name, Date, Check In (HH:MM:SS),
@@ -465,6 +482,95 @@ def _build_daily_trend(daily):
     return grp.sort_values("Date").reset_index(drop=True)
 
 
+def _build_employee_reconciliation(df, schedules_df, daily):
+    """Return (reconciliation_table, counts_dict).
+
+    The table is the human-readable explainer; the dict carries the raw
+    integers so they can flow straight into the summary KPIs.
+    """
+    counts = {
+        "attendance_file_employees": int(df["Employee ID"].nunique()),
+        "employees_with_checkins": int(daily["Employee ID"].nunique()),
+        "scheduled_employees": int(schedules_df["Name"].dropna().nunique()),
+        "employees_missing_schedule": int(
+            daily.loc[daily["missing_schedule"], "Employee ID"].nunique()
+        ),
+    }
+    counts["reporting_population"] = counts["employees_with_checkins"]
+
+    rows = [
+        (
+            "Attendance File Employees",
+            counts["attendance_file_employees"],
+            "attendance_raw.xlsx",
+            "Unique Employee ID values anywhere in the BioTime export, "
+            "including check-out and break punches. May still include "
+            "inactive or decommissioned IDs.",
+        ),
+        (
+            "Employees With Check-ins",
+            counts["employees_with_checkins"],
+            "attendance_raw.xlsx (Check In rows)",
+            "Unique Employee IDs that recorded at least one Check In "
+            "during the export period.",
+        ),
+        (
+            "Scheduled Employees From Odoo Resources",
+            counts["scheduled_employees"],
+            "Resources (resource.resource).xlsx",
+            "Unique Name values in the Odoo resource export -- employees "
+            "with an active Working Time assignment.",
+        ),
+        (
+            "Employees Missing Schedule",
+            counts["employees_missing_schedule"],
+            "derived",
+            "Employees with at least one Check In whose First Name does "
+            "not match any Name in the Odoo resources export.",
+        ),
+        (
+            "Reporting Population",
+            counts["reporting_population"],
+            "derived",
+            "The employee count used for this monthly report. Equals "
+            "Employees With Check-ins for the export period.",
+        ),
+    ]
+    table = pd.DataFrame(rows, columns=["metric", "count", "source", "definition"])
+    return table, counts
+
+
+def _build_employee_reconciliation_details(df, schedules_df, daily):
+    """Per-employee reconciliation rows covering every ID in the attendance
+    file: Employee ID, First Name, has_schedule, has_checkin, attendance_status_count.
+
+    Employees in the attendance file with no Check In get
+    attendance_status_count = 0 so they remain visible for audit.
+    """
+    all_emp = (
+        df.dropna(subset=["Employee ID"])
+        .groupby("Employee ID")["First Name"]
+        .first()
+        .reset_index()
+    )
+    all_emp["First Name"] = all_emp["First Name"].astype(str).str.strip()
+
+    schedule_names = set(
+        schedules_df["Name"].dropna().astype(str).str.strip()
+    )
+    all_emp["has_schedule"] = all_emp["First Name"].isin(schedule_names)
+
+    checkin_ids = set(daily["Employee ID"].unique())
+    all_emp["has_checkin"] = all_emp["Employee ID"].isin(checkin_ids)
+
+    status_counts = daily.groupby("Employee ID").size().to_dict()
+    all_emp["attendance_status_count"] = (
+        all_emp["Employee ID"].map(status_counts).fillna(0).astype(int)
+    )
+
+    return all_emp.sort_values("Employee ID").reset_index(drop=True)
+
+
 def calculate_metrics(df, schedules_df, time_off_df=None):
     shift_lookup = _build_shift_lookup(schedules_df)
     daily = _build_daily_attendance(df, shift_lookup)
@@ -479,6 +585,12 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     department_summary = _build_department_summary(daily)
     missing_punch_summary = _build_missing_punch_summary(daily)
     daily_trend = _build_daily_trend(daily)
+    reconciliation_table, employee_counts = _build_employee_reconciliation(
+        df, schedules_df, daily
+    )
+    reconciliation_details = _build_employee_reconciliation_details(
+        df, schedules_df, daily
+    )
 
     if employee_summary is not None and not employee_summary.empty:
         total_est = float(employee_summary["estimated_deduction"].sum())
@@ -490,7 +602,14 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         high_risk_employees = 0
 
     summary = {
-        "total_employees": int(df["Employee ID"].nunique()),
+        # Auditable employee-count taxonomy. See module docstring.
+        "attendance_file_employees": employee_counts["attendance_file_employees"],
+        "employees_with_checkins": employee_counts["employees_with_checkins"],
+        "scheduled_employees": employee_counts["scheduled_employees"],
+        "employees_missing_schedule": employee_counts["employees_missing_schedule"],
+        "reporting_population": employee_counts["reporting_population"],
+        # Backward-compat alias. Will be removed once all consumers migrate.
+        "total_employees": employee_counts["reporting_population"],
         "late_cases": int(len(late_rows)),
         "total_late_minutes": int(late_rows["unexcused_delay_minutes"].sum()),
         "approved_excuse_cases": int((daily["attendance_status"] == "Approved Excuse").sum()),
@@ -507,5 +626,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "department_summary": department_summary,
         "missing_punch_summary": missing_punch_summary,
         "daily_trend": daily_trend,
+        "employee_reconciliation": reconciliation_table,
+        "employee_reconciliation_details": reconciliation_details,
     }
     return summary, daily
