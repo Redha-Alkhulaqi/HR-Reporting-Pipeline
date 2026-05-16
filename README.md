@@ -29,6 +29,13 @@ report.
 - Validation layer that surfaces invalid dates, unexpected punch
   states, duplicate rows, etc. via the log.
 - Output versioning under `outputs/YYYY-MM/`.
+- Employee Master + HR Audit Flags (chronic lateness, repeated missing
+  checkouts, excessive excuses, no assigned schedule, attendance
+  anomalies) on every employee.
+- `data_quality_score` (0-100) summarizing missing schedules, missing
+  checkouts, orphan rows, duplicate names, invalid punches.
+- CLI period filter: `--month YYYY-MM` or `--from/--to YYYY-MM-DD`.
+- pytest test suite covering metrics, validators, and time-off logic.
 
 ## Input Files
 
@@ -87,6 +94,25 @@ python src/main.py
 ```
 
 The script is CWD-independent (paths are resolved from `PROJECT_ROOT`).
+
+### Restricting the reporting period
+
+By default the pipeline processes every row in `attendance_raw.xlsx`.
+To restrict to a window:
+
+```powershell
+python src/main.py --month 2026-05            # one calendar month
+python src/main.py --from 2026-05-01 --to 2026-05-15   # custom range
+```
+
+`--month` is mutually exclusive with `--from / --to` and just expands
+to that month's bounds.
+
+### Running tests
+
+```powershell
+python -m pytest tests/
+```
 
 ## How to Validate Results
 

@@ -55,6 +55,8 @@ data/                        src/                       outputs/YYYY-MM/
 | `ai_summary_generator.py` | Claude-facing Markdown brief, including an Executive Summary. |
 | `report_generator.py` | Console KPIs (DataFrames suppressed). |
 | `odoo_client.py` | XML-RPC scaffold for future direct Odoo integration. |
+| `pdf_exporter.py` | Placeholder for a future PDF export channel (not wired into main yet). |
+| `validators.py` | Pre-flight validation; ValidationError stops the run, warnings get logged. |
 
 ## Business Rules (summary)
 

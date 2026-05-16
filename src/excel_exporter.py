@@ -124,6 +124,7 @@ def _build_dashboard(wb, summary):
     kpis = [
         ("Reporting Population (employees with check-ins)",
          summary.get("reporting_population", summary.get("total_employees"))),
+        ("Data Quality Score (0-100)", summary.get("data_quality_score", "n/a")),
         ("Late Cases", summary["late_cases"]),
         ("Total Late Minutes (Unexcused)", summary["total_late_minutes"]),
         ("Approved Excuse Cases", summary["approved_excuse_cases"]),
@@ -132,6 +133,11 @@ def _build_dashboard(wb, summary):
         ("Missing Check-Out Cases", summary["missing_check_out_cases"]),
         ("Excused Delay Minutes", summary["excused_delay_minutes"]),
         ("High Risk Employees", summary.get("high_risk_employees", 0)),
+        ("Orphan Attendance Records", summary.get("orphan_attendance_records", 0)),
+        ("Unscheduled Active Employees", summary.get("unscheduled_active_employees", 0)),
+        ("Duplicate Employee Names", summary.get("duplicate_employee_names", 0)),
+        ("Missing Employee IDs", summary.get("missing_employee_ids", 0)),
+        ("Invalid Punches", summary.get("invalid_punches_count", 0)),
         ("Estimated Deduction (uncapped)", summary.get("total_estimated_deduction", 0)),
         (
             f"Estimated Deduction (capped at {MAX_MONTHLY_DEDUCTION:.0f}/employee)",
@@ -254,6 +260,10 @@ def export_report(summary, daily):
             wb.create_sheet("Employee Reconciliation Details"),
             reconciliation_details,
         )
+
+    employee_master = summary.get("employee_master")
+    if employee_master is not None and not employee_master.empty:
+        _build_data_sheet(wb.create_sheet("Employee Master"), employee_master)
 
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)

@@ -6,18 +6,22 @@ Sections (in order):
    2. Summary KPIs
    3. Employee Count Reconciliation  (auditable taxonomy; why our number
                                       can differ from Odoo / BioTime)
-   4. Attendance Status Breakdown
-   5. Excused vs Unexcused Analysis
-   6. Daily Trend
-   7. Top Late Employees          (full Employee Summary, includes
+   4. Data Quality                 (data_quality_score + audit signals)
+   5. Attendance Status Breakdown
+   6. Excused vs Unexcused Analysis
+   7. Daily Trend
+   8. Top Late Employees          (full Employee Summary, includes
                                    risk_score / risk_reason / deductions)
-   8. Department Summary          (only when department data is present)
-   9. Approved Excuse Records
-  10. Missing Punch Analysis
-  11. Employees Missing Working Schedule
-  12. Late Attendance Records
-  13. Business Logic Notes
-  14. Instructions for Claude
+   9. HR Audit Flags              (employees flagged for chronic late,
+                                   missing checkouts, excessive excuses,
+                                   no schedule, anomalies)
+  10. Department Summary          (only when department data is present)
+  11. Approved Excuse Records
+  12. Missing Punch Analysis
+  13. Employees Missing Working Schedule
+  14. Late Attendance Records
+  15. Business Logic Notes
+  16. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -93,6 +97,7 @@ def _build_executive_summary(metrics):
     high_risk = metrics.get("high_risk_employees", 0)
     dep = metrics.get("total_estimated_deduction", 0.0)
     dep_capped = metrics.get("total_deduction_capped", 0.0)
+    dq_score = metrics.get("data_quality_score", "n/a")
 
     employee_summary = metrics.get("employee_summary")
     if employee_summary is not None and not employee_summary.empty:
@@ -112,6 +117,8 @@ def _build_executive_summary(metrics):
 
 ### Executive Highlights
 - Workforce covered: **{total_emp}** employees.
+- Data Quality Score: **{dq_score} / 100** (see Data Quality section for
+  the underlying penalties).
 - **{late}** late day(s) totaling **{late_min}** unexcused minutes
   ({hours}h {minutes}m).
 - Approved excuses absorbed **{excused}** minutes of delay across
@@ -162,6 +169,55 @@ def _write_section(f, title, df, empty_message, head=None):
         return
     table = df.head(head) if head else df
     f.write(table.to_markdown(index=False))
+
+
+def _write_data_quality(f, metrics):
+    """Render the Data Quality section.
+
+    Shows the composite score and the audit counters that drove it, so
+    HR can see exactly which signal hurt the score.
+    """
+    score = metrics.get("data_quality_score", "n/a")
+    rows = [
+        ("Missing Schedule Cases", metrics.get("missing_schedule_cases", 0)),
+        ("Missing Check-Out Cases", metrics.get("missing_check_out_cases", 0)),
+        ("Orphan Attendance Records", metrics.get("orphan_attendance_records", 0)),
+        ("Unscheduled Active Employees", metrics.get("unscheduled_active_employees", 0)),
+        ("Duplicate Employee Names", metrics.get("duplicate_employee_names", 0)),
+        ("Missing Employee IDs", metrics.get("missing_employee_ids", 0)),
+        ("Invalid Punches", metrics.get("invalid_punches_count", 0)),
+    ]
+    f.write(f"\n\n## Data Quality\n")
+    f.write(f"**Data Quality Score: {score} / 100.** Higher is cleaner.\n\n")
+    f.write("| Signal | Count |\n|---|---:|\n")
+    for label, value in rows:
+        f.write(f"| {label} | {value} |\n")
+
+
+def _write_hr_audit_flags(f, metrics):
+    """Render the HR Audit Flags section: only employees with a non-empty
+    audit_flags string. Each flag is explained in the legend below."""
+    master = metrics.get("employee_master")
+    f.write("\n\n## HR Audit Flags\n")
+    f.write(
+        "Flag legend: `chronic_lateness` (>=5 late days), "
+        "`repeated_missing_checkouts` (>=5), `excessive_excuses` (>=4), "
+        "`no_assigned_schedule` (active without Odoo schedule), "
+        "`attendance_anomaly` (single delay >= 240 min, suggests wrong-shift).\n\n"
+    )
+    if master is None or master.empty:
+        f.write("No employee master available.\n")
+        return
+    flagged = master[master["audit_flags"].astype(bool)]
+    if flagged.empty:
+        f.write("No employees flagged this period.\n")
+        return
+    cols = [
+        "Employee ID", "First Name", "Status Consistency",
+        "late_count", "missing_checkout_count", "excuse_count",
+        "audit_flags",
+    ]
+    f.write(flagged[cols].to_markdown(index=False))
 
 
 def _write_employee_count_reconciliation(f, metrics):
@@ -236,6 +292,7 @@ def generate_ai_input_file(metrics, attendance_daily):
             f.write(f"- {key}: {value}\n")
 
         _write_employee_count_reconciliation(f, metrics)
+        _write_data_quality(f, metrics)
 
         _write_section(
             f, "Attendance Status Breakdown",
@@ -253,6 +310,8 @@ def generate_ai_input_file(metrics, attendance_daily):
             f, "Top Late Employees",
             metrics.get("employee_summary"), "No late employees found.",
         )
+
+        _write_hr_audit_flags(f, metrics)
 
         dept_summary = metrics.get("department_summary")
         f.write("\n\n## Department Summary\n")

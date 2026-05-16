@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-05-16 (Production hardening)
+- Added Employee Master DataFrame (one row per Employee ID with Odoo
+  Resource, Attendance Presence, Schedule Presence, Status Consistency,
+  per-employee counters, and a comma-separated `audit_flags` column).
+  Exposed as an `Employee Master` sheet in Excel.
+- Added HR audit flags: `chronic_lateness`, `repeated_missing_checkouts`,
+  `excessive_excuses`, `no_assigned_schedule`, `attendance_anomaly`.
+- Added `data_quality_score` (0..100) computed from missing schedules,
+  missing checkouts, orphan rows, duplicate names, missing employee IDs,
+  and invalid punches; surfaced as a KPI on the Dashboard and in the
+  Claude Executive Summary.
+- Added per-source data-quality counters in summary:
+  `orphan_attendance_records`, `duplicate_employee_names`,
+  `missing_employee_ids`, `unscheduled_active_employees`,
+  `invalid_punches_count`.
+- Added CLI arguments: `--month YYYY-MM`, `--from`, `--to` for
+  restricting the reporting period without editing code.
+- Added `src/pdf_exporter.py` placeholder (export_pdf currently raises
+  NotImplementedError; planned_output_path documents where the PDF
+  will land once implemented).
+- Added pytest suite under `tests/`:
+  `test_metrics.py`, `test_validators.py`, `test_timeoff_logic.py`.
+- Added `FINAL_PROJECT_STATUS.md`.
+
 ## 2026-05-16 (Employee count reconciliation)
 - Replaced the ambiguous `total_employees` KPI with five explicit,
   auditable counts in `summary`: `attendance_file_employees`,

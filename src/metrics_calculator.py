@@ -540,6 +540,130 @@ def _build_employee_reconciliation(df, schedules_df, daily):
     return table, counts
 
 
+_VALID_PUNCH_STATES = {"Check In", "Check Out", "Break In", "Break Out"}
+
+# Per-employee thresholds for HR audit flags. Kept here so HR can find
+# them in one place without hunting through config; promote to config.py
+# if the values need to vary by tenant.
+_CHRONIC_LATE_THRESHOLD = 5
+_REPEATED_MISSING_CHECKOUT_THRESHOLD = 5
+_EXCESSIVE_EXCUSE_THRESHOLD = 4
+_ANOMALY_DELAY_THRESHOLD_MIN = 240  # 4+ hours suggests wrong-shift assignment
+
+
+def _build_employee_master(df, schedules_df, daily):
+    """Per-employee reconciliation + HR audit flags.
+
+    One row per Employee ID seen in the attendance file. Columns:
+      Employee ID, First Name, Odoo Resource, Attendance Presence,
+      Schedule Presence, Status Consistency, checkin_count, late_count,
+      excuse_count, missing_checkout_count, audit_flags.
+
+    audit_flags is a comma-separated string drawn from:
+      chronic_lateness, repeated_missing_checkouts, excessive_excuses,
+      no_assigned_schedule, attendance_anomaly.
+    """
+    daily_agg = (
+        daily.groupby("Employee ID")
+        .agg(
+            checkin_count=("Date", "size"),
+            late_count=("is_late", "sum"),
+            excuse_count=(
+                "attendance_status",
+                lambda s: int((s == "Approved Excuse").sum()),
+            ),
+            missing_checkout_count=("missing_check_out", "sum"),
+            max_delay=("unexcused_delay_minutes", "max"),
+        )
+        .reset_index()
+    )
+
+    all_emp = (
+        df.dropna(subset=["Employee ID"])
+        .groupby("Employee ID")["First Name"]
+        .first()
+        .reset_index()
+    )
+    all_emp["First Name"] = all_emp["First Name"].astype(str).str.strip()
+
+    schedule_names = set(
+        schedules_df["Name"].dropna().astype(str).str.strip()
+    )
+    all_emp["Schedule Presence"] = all_emp["First Name"].isin(schedule_names)
+    all_emp["Odoo Resource"] = all_emp["First Name"].where(
+        all_emp["Schedule Presence"], None
+    )
+
+    master = all_emp.merge(daily_agg, on="Employee ID", how="left")
+    for col in ["checkin_count", "late_count", "excuse_count",
+                "missing_checkout_count", "max_delay"]:
+        master[col] = master[col].fillna(0).astype(int)
+    master["Attendance Presence"] = master["checkin_count"] > 0
+
+    def _consistency(row):
+        if row["Attendance Presence"] and row["Schedule Presence"]:
+            return "Consistent"
+        if row["Attendance Presence"]:
+            return "Orphan (no schedule)"
+        if row["Schedule Presence"]:
+            return "Inactive (no check-ins)"
+        return "Unknown"
+
+    master["Status Consistency"] = master.apply(_consistency, axis=1)
+
+    def _flags(row):
+        flags = []
+        if row["late_count"] >= _CHRONIC_LATE_THRESHOLD:
+            flags.append("chronic_lateness")
+        if row["missing_checkout_count"] >= _REPEATED_MISSING_CHECKOUT_THRESHOLD:
+            flags.append("repeated_missing_checkouts")
+        if row["excuse_count"] >= _EXCESSIVE_EXCUSE_THRESHOLD:
+            flags.append("excessive_excuses")
+        if row["Attendance Presence"] and not row["Schedule Presence"]:
+            flags.append("no_assigned_schedule")
+        if row["max_delay"] >= _ANOMALY_DELAY_THRESHOLD_MIN:
+            flags.append("attendance_anomaly")
+        return ", ".join(flags)
+
+    master["audit_flags"] = master.apply(_flags, axis=1)
+
+    return master[
+        [
+            "Employee ID", "First Name", "Odoo Resource",
+            "Attendance Presence", "Schedule Presence", "Status Consistency",
+            "checkin_count", "late_count", "excuse_count",
+            "missing_checkout_count", "audit_flags",
+        ]
+    ].sort_values("Employee ID").reset_index(drop=True)
+
+
+def _compute_data_quality_score(
+    df, daily, employee_master,
+    missing_schedule_cases, missing_check_out_cases,
+    unscheduled_active, duplicate_names, missing_ids, invalid_punches,
+):
+    """Return a 0..100 data quality score. Higher is cleaner data.
+
+    Each contributing factor adds a capped penalty so that catastrophic
+    data still tops out at 0 (never goes negative) and no single factor
+    can dominate the score.
+    """
+    total_daily = max(len(daily), 1)
+    total_emp = max(len(employee_master), 1)
+    total_punches = max(len(df), 1)
+
+    penalties = {
+        "missing_schedule": min(25, 100 * missing_schedule_cases / total_daily),
+        "missing_checkout": min(15, 100 * missing_check_out_cases / total_daily),
+        "orphan_employees": min(20, 100 * unscheduled_active / total_emp),
+        "duplicate_names": min(10, duplicate_names * 5),
+        "missing_employee_ids": min(15, missing_ids),
+        "invalid_punches": min(15, 100 * invalid_punches / total_punches),
+    }
+    score = max(0.0, 100.0 - sum(penalties.values()))
+    return round(score, 1)
+
+
 def _build_employee_reconciliation_details(df, schedules_df, daily):
     """Per-employee reconciliation rows covering every ID in the attendance
     file: Employee ID, First Name, has_schedule, has_checkin, attendance_status_count.
@@ -591,6 +715,28 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     reconciliation_details = _build_employee_reconciliation_details(
         df, schedules_df, daily
     )
+    employee_master = _build_employee_master(df, schedules_df, daily)
+
+    schedule_names = set(schedules_df["Name"].dropna().astype(str).str.strip())
+    orphan_attendance_records = int(
+        (~df["First Name"].astype(str).str.strip().isin(schedule_names)).sum()
+    )
+    unscheduled_active = int(
+        ((employee_master["Attendance Presence"]) & (~employee_master["Schedule Presence"])).sum()
+    )
+    duplicate_names = int(
+        (employee_master["First Name"].value_counts() > 1).sum()
+    )
+    missing_ids = int(df["Employee ID"].isna().sum())
+    invalid_punches = int((~df["Punch State"].isin(_VALID_PUNCH_STATES)).sum())
+
+    missing_schedule_cases = int((daily["attendance_status"] == "Missing Schedule").sum())
+    missing_check_out_cases = int(daily["missing_check_out"].sum())
+    data_quality_score = _compute_data_quality_score(
+        df, daily, employee_master,
+        missing_schedule_cases, missing_check_out_cases,
+        unscheduled_active, duplicate_names, missing_ids, invalid_punches,
+    )
 
     if employee_summary is not None and not employee_summary.empty:
         total_est = float(employee_summary["estimated_deduction"].sum())
@@ -614,12 +760,20 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "total_late_minutes": int(late_rows["unexcused_delay_minutes"].sum()),
         "approved_excuse_cases": int((daily["attendance_status"] == "Approved Excuse").sum()),
         "leave_cases": int((daily["attendance_status"] == "Leave").sum()),
-        "missing_schedule_cases": int((daily["attendance_status"] == "Missing Schedule").sum()),
-        "missing_check_out_cases": int(daily["missing_check_out"].sum()),
+        "missing_schedule_cases": missing_schedule_cases,
+        "missing_check_out_cases": missing_check_out_cases,
         "excused_delay_minutes": int(daily["excused_delay_minutes"].sum()),
         "total_estimated_deduction": round(total_est, 2),
         "total_deduction_capped": round(total_capped, 2),
         "high_risk_employees": high_risk_employees,
+        # Data-quality / audit signals from the employee master.
+        "orphan_attendance_records": orphan_attendance_records,
+        "duplicate_employee_names": duplicate_names,
+        "missing_employee_ids": missing_ids,
+        "unscheduled_active_employees": unscheduled_active,
+        "invalid_punches_count": invalid_punches,
+        "data_quality_score": data_quality_score,
+        # DataFrames.
         "employee_summary": employee_summary,
         "status_summary": status_summary,
         "excused_vs_unexcused": excused_vs_unexcused,
@@ -628,5 +782,6 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "daily_trend": daily_trend,
         "employee_reconciliation": reconciliation_table,
         "employee_reconciliation_details": reconciliation_details,
+        "employee_master": employee_master,
     }
     return summary, daily
