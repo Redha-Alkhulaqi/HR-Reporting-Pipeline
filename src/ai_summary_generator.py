@@ -18,14 +18,15 @@ Sections (in order):
   10. Excluded Employees          (policy exclusions from KPIs while
                                    operational data stays visible)
   11. Early Leave Analysis        (counts, minutes, top early-leave employees)
-  12. Overtime Analysis           (counts, hours, top overtime employees)
-  13. Department Summary          (only when department data is present)
-  14. Approved Excuse Records
-  15. Missing Punch Analysis
-  16. Employees Missing Working Schedule
-  17. Late Attendance Records
-  18. Business Logic Notes
-  19. Instructions for Claude
+  12. Early Leave Anomalies       (rows above the implausibility threshold)
+  13. Overtime Analysis           (counts, hours, top overtime employees)
+  14. Department Summary          (only when department data is present)
+  15. Approved Excuse Records
+  16. Missing Punch Analysis
+  17. Employees Missing Working Schedule
+  18. Late Attendance Records
+  19. Business Logic Notes
+  20. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -355,6 +356,32 @@ def generate_ai_input_file(metrics, attendance_daily):
             "the configured grace window. Days with no Check Out or "
             "no shift assignment are excluded.\n"
         )
+
+        f.write("\n\n## Early Leave Anomalies\n")
+        anomaly_count = metrics.get("early_leave_anomaly_cases", 0)
+        anomaly_rows = daily[
+            daily.get("early_leave_anomaly", False) == True  # noqa: E712
+        ]
+        f.write(
+            f"**{anomaly_count}** day(s) recorded an implausibly large "
+            "early-leave value (above the configured threshold). These "
+            "rows are KEPT in every total -- they are flagged here for "
+            "HR review because the underlying cause is usually a "
+            "missing Check Out, a wrong shift assignment, a device "
+            "sync issue, or a partial attendance record rather than a "
+            "genuine early departure.\n\n"
+        )
+        if anomaly_rows.empty:
+            f.write("_No anomalous early-leave rows this period._\n")
+        else:
+            cols = [
+                "Employee ID", "First Name", "Date",
+                "Check In", "Check Out",
+                "matched_shift_label",
+                "early_leave_minutes", "early_leave_anomaly_reason",
+            ]
+            available = [c for c in cols if c in anomaly_rows.columns]
+            f.write(anomaly_rows[available].to_markdown(index=False))
 
         f.write("\n\n## Overtime Analysis\n")
         ot_cases = metrics.get("overtime_cases", 0)

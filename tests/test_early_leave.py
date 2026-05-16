@@ -86,3 +86,28 @@ def test_overtime_keeps_early_leave_normal():
     summary, daily = calculate_metrics(df, sched)
     assert (daily["early_leave_status"] == "Normal").all()
     assert (daily["overtime_status"] == "Overtime").all()
+
+
+def test_early_leave_under_threshold_is_not_anomaly():
+    # 30 min early -- well under MAX_REASONABLE_EARLY_LEAVE_MINUTES (180).
+    df, sched = _inputs("08:00:00", "16:30:00")
+    summary, daily = calculate_metrics(df, sched)
+    row = daily.iloc[0]
+    assert row["early_leave_status"] == "Early Leave"
+    assert row["early_leave_anomaly"] == False  # noqa: E712
+    assert row["early_leave_anomaly_reason"] == ""
+    assert summary["early_leave_anomaly_cases"] == 0
+
+
+def test_early_leave_above_threshold_is_anomaly_but_kept():
+    # Check-out 8 hours early (480 min) -- well above 180-min threshold.
+    df, sched = _inputs("08:00:00", "09:00:00")
+    summary, daily = calculate_metrics(df, sched)
+    row = daily.iloc[0]
+    assert row["early_leave_status"] == "Early Leave"
+    assert row["early_leave_minutes"] == 480
+    assert row["early_leave_anomaly"] == True  # noqa: E712
+    assert row["early_leave_anomaly_reason"] == "Exceeds reasonable threshold"
+    # Anomaly row STILL counts toward the totals -- it is only flagged.
+    assert summary["total_early_leave_minutes"] == 480
+    assert summary["early_leave_anomaly_cases"] == 1

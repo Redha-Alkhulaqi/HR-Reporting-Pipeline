@@ -46,6 +46,14 @@ MIN_OVERTIME_MINUTES = int(os.getenv("MIN_OVERTIME_MINUTES", "30"))
 # only when the gap exceeds this grace window.
 EARLY_LEAVE_GRACE_MINUTES = int(os.getenv("EARLY_LEAVE_GRACE_MINUTES", "10"))
 
+# Early-leave anomaly threshold. Above this many minutes the row is
+# flagged for HR review (likely missing Check Out, wrong shift, device
+# sync issue, or a partial attendance record). The row is NOT dropped
+# from any KPI -- only annotated.
+MAX_REASONABLE_EARLY_LEAVE_MINUTES = int(
+    os.getenv("MAX_REASONABLE_EARLY_LEAVE_MINUTES", "180")
+)
+
 # Employee exclusions. When the exclusion file lacks an Employee ID for
 # a row, fall back to matching the row's normalized Employee Name
 # against the attendance file. Disable for stricter ID-only matching.

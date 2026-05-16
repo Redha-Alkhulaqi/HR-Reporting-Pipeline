@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-05-16 (Early-leave anomaly validation)
+- Added `MAX_REASONABLE_EARLY_LEAVE_MINUTES` (default 180) in
+  `config.py`. Anything above is flagged as an anomaly.
+- Added daily columns `early_leave_anomaly` (bool) and
+  `early_leave_anomaly_reason` (currently `"Exceeds reasonable threshold"`).
+- Added `early_leave_anomaly_cases` KPI to the summary dict and to the
+  Dashboard's KPI block.
+- Anomaly rows are KEPT in every total -- they are flagged so HR can
+  investigate likely causes (missing Check Out, wrong shift
+  assignment, device sync issue, partial attendance record).
+- Excel: added a high-priority dark-red conditional-formatting rule
+  on Daily Attendance for anomaly rows so HR spots them at a glance.
+- Excel: Early Leave sheet now exposes `early_leave_anomaly` and
+  `early_leave_anomaly_reason`.
+- Claude markdown: new `## Early Leave Anomalies` section listing the
+  affected (Employee ID, Date, Check In/Out, matched shift, minutes,
+  reason).
+- Added 2 tests to `tests/test_early_leave.py` covering the
+  under-threshold and above-threshold cases (63 total).
+
 ## 2026-05-16 (Split-shift fix for early leave / overtime)
 - Fixed a bug where split-shift employees (e.g. `9AM-1PM & 4PM-8PM`)
   were wrongly flagged with huge early_leave_minutes. The previous

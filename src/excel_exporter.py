@@ -126,6 +126,7 @@ def _apply_daily_conditional_formatting(ws, df):
     unexcused_L = col_letter("unexcused_delay_minutes")
     overtime_L = col_letter("overtime_minutes")
     early_leave_L = col_letter("early_leave_minutes")
+    early_leave_anomaly_L = col_letter("early_leave_anomaly")
     missing_co_L = col_letter("missing_check_out")
     status_L = col_letter("attendance_status")
     excluded_L = col_letter("is_excluded")
@@ -147,6 +148,13 @@ def _apply_daily_conditional_formatting(ws, df):
     if status_L:
         _add(f'${status_L}2="Leave"', "BFBFBF")             # gray
         _add(f'${status_L}2="Approved Excuse"', "DDEBF7")   # light blue
+    # Early-leave ANOMALIES outrank normal Late/Early Leave so HR can
+    # spot data-quality issues at a glance (distinct dark red).
+    if early_leave_anomaly_L:
+        _add(
+            f"${early_leave_anomaly_L}2=TRUE",
+            "8B0000", font_hex="FFFFFF", bold=True,         # dark red + white bold
+        )
     if is_late_L and unexcused_L:
         _add(
             f"OR(${is_late_L}2=TRUE,${unexcused_L}2>0)",
@@ -239,6 +247,8 @@ def _build_dashboard(wb, summary):
         ("Total Overtime Hours", summary.get("total_overtime_hours", 0), "0.0"),
         ("Early Leave Cases", summary.get("early_leave_cases", 0), "#,##0"),
         ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
+        ("Early Leave Anomalies (review)",
+         summary.get("early_leave_anomaly_cases", 0), "#,##0"),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -470,6 +480,7 @@ def export_report(summary, daily):
                 "matched_shift_label", "shift_intervals",
                 "matched_scheduled_minutes",
                 "early_leave_minutes", "early_leave_status",
+                "early_leave_anomaly", "early_leave_anomaly_reason",
             ]],
         )
 

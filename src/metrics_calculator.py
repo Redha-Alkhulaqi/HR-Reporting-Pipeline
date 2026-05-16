@@ -99,6 +99,7 @@ from config import (
     GRACE_MINUTES,
     LATE_MINUTE_COST,
     MAX_MONTHLY_DEDUCTION,
+    MAX_REASONABLE_EARLY_LEAVE_MINUTES,
     MIN_OVERTIME_MINUTES,
     OVERTIME_GRACE_MINUTES,
     RISK_HIGH_THRESHOLD,
@@ -450,6 +451,7 @@ _OVERTIME_RESULT_COLS = [
     "shift_intervals",
     "overtime_minutes", "overtime_status",
     "early_leave_minutes", "early_leave_status",
+    "early_leave_anomaly", "early_leave_anomaly_reason",
 ]
 
 
@@ -469,6 +471,8 @@ def _empty_overtime_result(status):
         "overtime_status": status,
         "early_leave_minutes": 0,
         "early_leave_status": status,
+        "early_leave_anomaly": False,
+        "early_leave_anomaly_reason": "",
     }
 
 
@@ -587,6 +591,15 @@ def _classify_overtime_row(row, intervals_lookup):
         else:
             early_leave, el_status = 0, "Normal"
 
+    # Flag implausibly large early-leave values for HR review. We DO
+    # NOT drop the row -- it still contributes to the totals -- because
+    # the underlying cause is usually data-quality (missing Check Out,
+    # wrong shift, device sync) that HR should chase up.
+    if early_leave > MAX_REASONABLE_EARLY_LEAVE_MINUTES:
+        anomaly, anomaly_reason = True, "Exceeds reasonable threshold"
+    else:
+        anomaly, anomaly_reason = False, ""
+
     matched_start_str, matched_end_str = intervals[matched_idx]
     return {
         "Shift End DateTime": matched_end_dt,
@@ -602,6 +615,8 @@ def _classify_overtime_row(row, intervals_lookup):
         "overtime_status": ot_status,
         "early_leave_minutes": early_leave,
         "early_leave_status": el_status,
+        "early_leave_anomaly": anomaly,
+        "early_leave_anomaly_reason": anomaly_reason,
     }
 
 
@@ -1336,6 +1351,10 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "early_leave_cases": early_leave_cases,
         "total_early_leave_minutes": total_early_leave_minutes,
         "employees_with_early_leave": employees_with_early_leave,
+        "early_leave_anomaly_cases": int(
+            daily["early_leave_anomaly"].sum()
+            if "early_leave_anomaly" in daily.columns else 0
+        ),
         # DataFrames.
         "employee_summary": employee_summary,
         "status_summary": status_summary,
