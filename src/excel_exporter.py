@@ -450,7 +450,10 @@ def export_report(summary, daily):
             overtime_rows[[
                 "Employee ID", "First Name", "Date",
                 "Check In", "Check Out", "Shift Start", "Shift End",
+                "matched_shift_start", "matched_shift_end",
+                "matched_shift_label", "shift_intervals",
                 "worked_minutes", "scheduled_minutes",
+                "matched_scheduled_minutes",
                 "overtime_minutes", "overtime_status",
             ]],
         )
@@ -463,6 +466,9 @@ def export_report(summary, daily):
             early_leave_rows[[
                 "Employee ID", "First Name", "Date",
                 "Check In", "Check Out", "Shift Start", "Shift End",
+                "matched_shift_start", "matched_shift_end",
+                "matched_shift_label", "shift_intervals",
+                "matched_scheduled_minutes",
                 "early_leave_minutes", "early_leave_status",
             ]],
         )

@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-05-16 (Split-shift fix for early leave / overtime)
+- Fixed a bug where split-shift employees (e.g. `9AM-1PM & 4PM-8PM`)
+  were wrongly flagged with huge early_leave_minutes. The previous
+  logic compared every Check Out against the LAST interval's end, so
+  a morning-only check-out at 1pm looked like a 7-hour early leave.
+- Added `extract_shift_intervals` (parses every interval pair from a
+  Working Time label) and made it the single source of truth.
+  `extract_shift_start` and `extract_shift_end` are now derived from
+  it.
+- Added the matching engine `_find_matched_interval_idx` that picks
+  the relevant segment based on Check Out (preferred), then Check In,
+  then the closest interval to Check In.
+- Gap detection: when Check Out falls between two segments, no
+  overtime and no early leave are recorded.
+- Added daily columns: `matched_shift_start`, `matched_shift_end`,
+  `matched_shift_label`, `matched_scheduled_minutes`,
+  `shift_intervals`. Overtime / early-leave now compute against
+  `matched_shift_end` instead of the day's final shift end.
+- `scheduled_minutes` becomes the SUM of all interval durations;
+  `matched_scheduled_minutes` is the duration of the matched segment
+  only.
+- Excel: Overtime and Early Leave sheets show the new matched
+  columns + intervals label.
+- Added `tests/test_split_shifts.py` covering single shift, split-
+  shift morning / evening, gap-between-segments, overtime past the
+  matched segment, early leave from evening, and night-shift wrap
+  (12 new tests; 61 total).
+- Removed dead helpers `_SHIFT_TIME_RE`, `_TIME_TOKEN_RE`,
+  `_build_shift_end_lookup`, `_build_shift_lookup` (logic now lives
+  inline in `calculate_metrics`).
+
+Real-data impact (one run, exclusion file active):
+  early_leave_cases:        17  -> 11
+  total_early_leave_minutes:  3521 ->  669
+  employees_with_early_leave: 12 -> 10
+  late_cases / overtime_cases unchanged.
+
 ## 2026-05-16 (Early leave + conditional formatting)
 - Added Early Leave detection with `EARLY_LEAVE_GRACE_MINUTES` (default
   10) in `config.py`. A Check Out before Shift End counts as Early

@@ -111,39 +111,62 @@ from config import (
 # approved time-off row is treated as LEAVE (full-day, supersedes attendance).
 _EXCUSE_KEYWORDS = ("استأذان", "استئذان", "excuse", "permission")
 
-_SHIFT_TIME_RE = re.compile(r"\((\d{1,2}:\d{2}\s*[AP]M)", re.IGNORECASE)
-# Bare HH:MM AM/PM token (no leading bracket constraint). Used by
-# extract_shift_end so split-shift labels return the LAST end time.
-_TIME_TOKEN_RE = re.compile(r"\d{1,2}:\d{2}\s*[AP]M", re.IGNORECASE)
-
 # Source columns that we accept as the employee's department / org unit.
 _DEPARTMENT_COL_CANDIDATES = (
     "Department", "Department Name", "Work Location", "Company",
 )
 
 
+# Pair-matcher used by extract_shift_intervals to find every
+# "HH:MM AM - HH:MM PM" pair inside an Odoo Working Time label.
+_SHIFT_INTERVAL_RE = re.compile(
+    r"(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)",
+    re.IGNORECASE,
+)
+
+
+def extract_shift_intervals(working_time):
+    """Return all shift intervals parsed from a Working Time label.
+
+    Each interval is a `(start_HHMM, end_HHMM)` tuple. Examples:
+
+      "(8:00AM-5:00PM)"
+        -> [("08:00", "17:00")]
+
+      "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (6:00PM-10:00PM)"
+        -> [("09:00", "13:00"), ("18:00", "22:00")]
+
+    Returns an empty list when nothing parseable is found.
+    """
+    intervals = []
+    for start_raw, end_raw in _SHIFT_INTERVAL_RE.findall(str(working_time)):
+        try:
+            start = datetime.strptime(
+                start_raw.replace(" ", "").upper(), "%I:%M%p"
+            ).strftime("%H:%M")
+            end = datetime.strptime(
+                end_raw.replace(" ", "").upper(), "%I:%M%p"
+            ).strftime("%H:%M")
+        except ValueError:
+            continue
+        intervals.append((start, end))
+    return intervals
+
+
 def extract_shift_start(working_time):
-    """Pull the first HH:MMAM/PM token from an Odoo Working Time label."""
-    match = _SHIFT_TIME_RE.search(str(working_time))
-    if not match:
-        return None
-    time_text = match.group(1).replace(" ", "").upper()
-    return datetime.strptime(time_text, "%I:%M%p").strftime("%H:%M")
+    """Return the first interval's start time (HH:MM) or None."""
+    intervals = extract_shift_intervals(working_time)
+    return intervals[0][0] if intervals else None
 
 
 def extract_shift_end(working_time):
-    """Pull the LAST HH:MMAM/PM token from an Odoo Working Time label.
+    """Return the LAST interval's end time (HH:MM) or None.
 
-    For split-shift labels like
-        "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (6:00PM-10:00PM)"
-    this returns the end of the LAST shift block (the close of the
-    working day) rather than the close of the first block.
+    For split-shift labels this is the close of the day, not the close
+    of the first segment.
     """
-    tokens = _TIME_TOKEN_RE.findall(str(working_time))
-    if len(tokens) < 2:
-        return None
-    end_text = tokens[-1].replace(" ", "").upper()
-    return datetime.strptime(end_text, "%I:%M%p").strftime("%H:%M")
+    intervals = extract_shift_intervals(working_time)
+    return intervals[-1][1] if intervals else None
 
 
 def _is_excuse_type(type_name):
@@ -279,12 +302,14 @@ def _compute_risk(late_count, total_late_minutes, missing_checkout_count, excuse
     return score, level, reason
 
 
-def _build_shift_lookup(schedules_df):
-    """Return dict: cleaned employee name -> Shift Start (HH:MM)."""
+def _build_shift_intervals_lookup(schedules_df):
+    """Return dict: cleaned employee name -> list of (start_HHMM, end_HHMM)."""
     schedules = schedules_df[["Name", "Working Time"]].copy()
     schedules["Name"] = schedules["Name"].astype(str).str.strip()
-    schedules["Shift Start"] = schedules["Working Time"].apply(extract_shift_start)
-    return schedules.set_index("Name")["Shift Start"].to_dict()
+    schedules["intervals"] = schedules["Working Time"].apply(extract_shift_intervals)
+    return schedules.set_index("Name")["intervals"].to_dict()
+
+
 
 
 def _build_daily_attendance(df, shift_lookup):
@@ -418,51 +443,106 @@ def _attach_checkout_info(daily, df):
     return daily
 
 
-def _build_shift_end_lookup(schedules_df):
-    """Return dict: cleaned employee name -> Shift End (HH:MM)."""
-    schedules = schedules_df[["Name", "Working Time"]].copy()
-    schedules["Name"] = schedules["Name"].astype(str).str.strip()
-    schedules["Shift End"] = schedules["Working Time"].apply(extract_shift_end)
-    return schedules.set_index("Name")["Shift End"].to_dict()
+_OVERTIME_RESULT_COLS = [
+    "Shift End DateTime", "Check Out DateTime",
+    "worked_minutes", "scheduled_minutes", "matched_scheduled_minutes",
+    "matched_shift_start", "matched_shift_end", "matched_shift_label",
+    "shift_intervals",
+    "overtime_minutes", "overtime_status",
+    "early_leave_minutes", "early_leave_status",
+]
 
 
-def _classify_overtime_row(row):
-    """Per-row overtime AND early-leave computation.
+def _empty_overtime_result(status):
+    """Default values for rows that cannot be classified (missing data)."""
+    return {
+        "Shift End DateTime": pd.NaT,
+        "Check Out DateTime": pd.NaT,
+        "worked_minutes": 0,
+        "scheduled_minutes": 0,
+        "matched_scheduled_minutes": 0,
+        "matched_shift_start": None,
+        "matched_shift_end": None,
+        "matched_shift_label": None,
+        "shift_intervals": None,
+        "overtime_minutes": 0,
+        "overtime_status": status,
+        "early_leave_minutes": 0,
+        "early_leave_status": status,
+    }
 
-    Returns a dict with Shift End DateTime, Check Out DateTime,
-    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status,
-    early_leave_minutes, early_leave_status.
 
-    Night-shift handling: if Shift End < Shift Start in clock time, the
-    shift crosses midnight and Shift End rolls to the next day. Same
-    for Check Out vs Check In.
+def _intervals_to_datetimes(date_str, intervals):
+    """Convert string intervals to (start_dt, end_dt) tuples for one date.
 
-    Overtime and early-leave are inverses against the same Shift End:
-    a positive `Check Out - Shift End` is the overtime branch; a negative
-    one is the early-leave branch. Each has its own grace window.
+    Handles night-shift wrap (end-before-start in clock time rolls to
+    next day) and multi-segment chronology (next interval whose start
+    precedes the previous interval's end rolls one day forward).
+    """
+    result = []
+    prev_end = None
+    for start_str, end_str in intervals:
+        start_dt = pd.to_datetime(f"{date_str} {start_str}:00")
+        end_dt = pd.to_datetime(f"{date_str} {end_str}:00")
+        if end_dt < start_dt:
+            end_dt += pd.Timedelta(days=1)
+        if prev_end is not None and start_dt < prev_end:
+            shift = pd.Timedelta(days=1)
+            start_dt += shift
+            end_dt += shift
+        result.append((start_dt, end_dt))
+        prev_end = end_dt
+    return result
+
+
+def _find_matched_interval_idx(check_in_dt, check_out_dt, interval_dts):
+    """Pick the interval that matters for this employee-day.
+
+    Priority:
+      1. The interval that CONTAINS Check Out (end-of-day signal).
+      2. If Check Out is past the last interval's end, the last interval
+         (overtime extending past the final segment).
+      3. The interval that contains Check In (employee started here).
+      4. The interval whose start is closest to Check In (best guess).
+    """
+    for i, (start, end) in enumerate(interval_dts):
+        if start <= check_out_dt <= end:
+            return i
+    if check_out_dt > interval_dts[-1][1]:
+        return len(interval_dts) - 1
+    for i, (start, end) in enumerate(interval_dts):
+        if start <= check_in_dt <= end:
+            return i
+    return min(
+        range(len(interval_dts)),
+        key=lambda i: abs((interval_dts[i][0] - check_in_dt).total_seconds()),
+    )
+
+
+def _classify_overtime_row(row, intervals_lookup):
+    """Per-row overtime AND early-leave computation against the MATCHED
+    interval (the one the employee actually worked), not the day's final
+    interval. This makes split-shift days reconcile correctly:
+
+      - A morning-only employee on a 9am-1pm / 4pm-8pm schedule who
+        leaves at 1pm is normal (matched = morning, delta = 0).
+      - The same employee leaving at 2pm is in the GAP between segments
+        and is also normal (no overtime, no early leave).
+      - The same employee leaving at 8pm matches the evening interval.
+
+    Night-shift wrap is honored (Shift End rolls to next day if it
+    falls before Shift Start in clock time, same for Check Out vs
+    Check In).
     """
     if not row["has_check_out"]:
-        return {
-            "Shift End DateTime": pd.NaT,
-            "Check Out DateTime": pd.NaT,
-            "worked_minutes": 0,
-            "scheduled_minutes": 0,
-            "overtime_minutes": 0,
-            "overtime_status": "Missing Check Out",
-            "early_leave_minutes": 0,
-            "early_leave_status": "Missing Check Out",
-        }
-    if row["missing_schedule"] or pd.isna(row["Shift End"]):
-        return {
-            "Shift End DateTime": pd.NaT,
-            "Check Out DateTime": pd.NaT,
-            "worked_minutes": 0,
-            "scheduled_minutes": 0,
-            "overtime_minutes": 0,
-            "overtime_status": "Missing Schedule",
-            "early_leave_minutes": 0,
-            "early_leave_status": "Missing Schedule",
-        }
+        return _empty_overtime_result("Missing Check Out")
+    if row["missing_schedule"]:
+        return _empty_overtime_result("Missing Schedule")
+
+    name = str(row["First Name"]).strip()
+    intervals = intervals_lookup.get(name) or []
+    if not intervals:
+        return _empty_overtime_result("Missing Schedule")
 
     date_str = row["Date"]
     check_in_dt = pd.to_datetime(f"{date_str} {row['Check In']}")
@@ -470,24 +550,36 @@ def _classify_overtime_row(row):
     if check_out_dt < check_in_dt:
         check_out_dt += pd.Timedelta(days=1)
 
-    shift_start_dt = pd.to_datetime(f"{date_str} {row['Shift Start']}:00")
-    shift_end_dt = pd.to_datetime(f"{date_str} {row['Shift End']}:00")
-    if shift_end_dt < shift_start_dt:
-        shift_end_dt += pd.Timedelta(days=1)
+    interval_dts = _intervals_to_datetimes(date_str, intervals)
+    matched_idx = _find_matched_interval_idx(check_in_dt, check_out_dt, interval_dts)
+    matched_start_dt, matched_end_dt = interval_dts[matched_idx]
 
     worked = int((check_out_dt - check_in_dt).total_seconds() / 60)
-    scheduled = int((shift_end_dt - shift_start_dt).total_seconds() / 60)
+    scheduled = sum(
+        int((end - start).total_seconds() / 60) for start, end in interval_dts
+    )
+    matched_scheduled = int(
+        (matched_end_dt - matched_start_dt).total_seconds() / 60
+    )
 
-    delta = int((check_out_dt - shift_end_dt).total_seconds() / 60)
-    if delta >= 0:
-        # On-time or overtime branch.
-        if delta <= OVERTIME_GRACE_MINUTES or delta < MIN_OVERTIME_MINUTES:
+    delta = int((check_out_dt - matched_end_dt).total_seconds() / 60)
+    in_gap = (
+        delta > 0
+        and matched_idx < len(interval_dts) - 1
+        and check_out_dt < interval_dts[matched_idx + 1][0]
+    )
+
+    if in_gap or (delta >= 0 and delta <= OVERTIME_GRACE_MINUTES):
+        overtime, ot_status = 0, "No Overtime"
+        early_leave, el_status = 0, "Normal"
+    elif delta > 0:
+        if delta < MIN_OVERTIME_MINUTES:
             overtime, ot_status = 0, "No Overtime"
         else:
             overtime, ot_status = delta, "Overtime"
         early_leave, el_status = 0, "Normal"
     else:
-        # Early-leave branch (Check Out is before Shift End).
+        # delta < 0 -- Check Out before matched interval's end.
         overtime, ot_status = 0, "No Overtime"
         gap = -delta
         if gap > EARLY_LEAVE_GRACE_MINUTES:
@@ -495,11 +587,17 @@ def _classify_overtime_row(row):
         else:
             early_leave, el_status = 0, "Normal"
 
+    matched_start_str, matched_end_str = intervals[matched_idx]
     return {
-        "Shift End DateTime": shift_end_dt,
+        "Shift End DateTime": matched_end_dt,
         "Check Out DateTime": check_out_dt,
         "worked_minutes": worked,
         "scheduled_minutes": scheduled,
+        "matched_scheduled_minutes": matched_scheduled,
+        "matched_shift_start": matched_start_str,
+        "matched_shift_end": matched_end_str,
+        "matched_shift_label": f"{matched_start_str}-{matched_end_str}",
+        "shift_intervals": " / ".join(f"{s}-{e}" for s, e in intervals),
         "overtime_minutes": overtime,
         "overtime_status": ot_status,
         "early_leave_minutes": early_leave,
@@ -507,26 +605,32 @@ def _classify_overtime_row(row):
     }
 
 
-def _attach_overtime_info(daily, shift_end_lookup):
-    """Add Shift End, Shift End DateTime, Check Out DateTime,
-    worked_minutes, scheduled_minutes, overtime_minutes, overtime_status,
-    early_leave_minutes, early_leave_status."""
+def _attach_overtime_info(daily, intervals_lookup):
+    """Add per-segment shift-close fields to daily.
+
+    `Shift End` is preserved as the LAST interval's end (a stable daily
+    label). The per-row matched_shift_* / shift_intervals columns and
+    the overtime / early-leave fields use the segment the employee
+    actually worked.
+    """
+    shift_end_lookup = {
+        name: (intervals[-1][1] if intervals else None)
+        for name, intervals in intervals_lookup.items()
+    }
     daily["Shift End"] = daily["First Name"].map(shift_end_lookup)
 
-    result_cols = [
-        "Shift End DateTime", "Check Out DateTime",
-        "worked_minutes", "scheduled_minutes",
-        "overtime_minutes", "overtime_status",
-        "early_leave_minutes", "early_leave_status",
-    ]
     rows = daily.apply(
-        lambda r: pd.Series(_classify_overtime_row(r), index=result_cols),
+        lambda r: pd.Series(
+            _classify_overtime_row(r, intervals_lookup),
+            index=_OVERTIME_RESULT_COLS,
+        ),
         axis=1,
     )
-    for col in result_cols:
+    for col in _OVERTIME_RESULT_COLS:
         daily[col] = rows[col]
     daily["worked_minutes"] = daily["worked_minutes"].astype(int)
     daily["scheduled_minutes"] = daily["scheduled_minutes"].astype(int)
+    daily["matched_scheduled_minutes"] = daily["matched_scheduled_minutes"].astype(int)
     daily["overtime_minutes"] = daily["overtime_minutes"].astype(int)
     daily["early_leave_minutes"] = daily["early_leave_minutes"].astype(int)
     return daily
@@ -1104,12 +1208,18 @@ def _build_employee_reconciliation_details(df, schedules_df, daily):
 
 
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
-    shift_lookup = _build_shift_lookup(schedules_df)
-    shift_end_lookup = _build_shift_end_lookup(schedules_df)
+    # Build the source-of-truth intervals lookup ONCE; derive the
+    # single-time lookups from it so all three views stay consistent
+    # even when shifts are split.
+    intervals_lookup = _build_shift_intervals_lookup(schedules_df)
+    shift_lookup = {
+        name: (intervals[0][0] if intervals else None)
+        for name, intervals in intervals_lookup.items()
+    }
     daily = _build_daily_attendance(df, shift_lookup)
     daily = _attach_attendance_status(daily, time_off_df)
     daily = _attach_checkout_info(daily, df)
-    daily = _attach_overtime_info(daily, shift_end_lookup)
+    daily = _attach_overtime_info(daily, intervals_lookup)
     daily = _attach_department(daily, df)
     daily = _attach_exclusion_info(daily, excluded_df)
 
