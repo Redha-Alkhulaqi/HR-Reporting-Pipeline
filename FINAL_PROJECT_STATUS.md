@@ -49,6 +49,12 @@ and [HR_REPORTING_RULES_MASTER.md](HR_REPORTING_RULES_MASTER.md).
   minimum thresholds, night-shift handling (Shift End / Check Out
   roll to next day), dashboard KPIs, Top Overtime Employees chart,
   dedicated Overtime sheet, and a Claude Overtime Analysis section.
+- Employee exclusion rules sourced from `data/excluded_employees.xlsx`
+  (optional). Per-employee booleans selectively suppress contribution
+  to the Late, Overtime, Payroll, or Risk Scoring KPIs while leaving
+  operational rows visible. ID match takes priority; normalized-name
+  match is the fallback (toggle with
+  `ALLOW_NAME_BASED_EXCLUSION_MATCH`).
 
 ### Reporting outputs
 - Multi-sheet Excel report with embedded dashboard charts:

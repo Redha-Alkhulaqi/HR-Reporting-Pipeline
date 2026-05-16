@@ -129,6 +129,23 @@ Missing Check Out or Missing Schedule rows are excluded with explicit
 `overtime_status`); per-employee aggregates land on `employee_summary`
 and `top_overtime_employees`.
 
+### Employee Exclusions
+Optional `data/excluded_employees.xlsx` supplies per-employee policy
+flags. The exclusion engine stamps each daily row with `is_excluded`,
+`exclusion_reason`, and four selective flags (`excluded_from_late`,
+`excluded_from_overtime`, `excluded_from_payroll`, `excluded_from_risk`).
+KPI aggregations honor the flags but operational rows stay visible:
+
+| Flag | Effect on KPI |
+|---|---|
+| `excluded_from_late` | drop row from `late_cases` / `total_late_minutes` |
+| `excluded_from_overtime` | drop row from `overtime_cases` / `total_overtime_minutes` / Top Overtime chart |
+| `excluded_from_payroll` | force `estimated_deduction` and `deduction_capped` to 0 in `employee_summary` |
+| `excluded_from_risk` | force `risk_score` to 0 and `risk_level` to `"Excluded"` |
+
+ID match wins. Name match is a fallback for rules without an ID
+(toggled by `ALLOW_NAME_BASED_EXCLUSION_MATCH`).
+
 ## Output Structure
 
 ```

@@ -94,6 +94,7 @@ from datetime import datetime
 import pandas as pd
 
 from config import (
+    ALLOW_NAME_BASED_EXCLUSION_MATCH,
     GRACE_MINUTES,
     LATE_MINUTE_COST,
     MAX_MONTHLY_DEDUCTION,
@@ -149,6 +150,86 @@ def _is_excuse_type(type_name):
         return False
     text = str(type_name).lower()
     return any(kw.lower() in text for kw in _EXCUSE_KEYWORDS)
+
+
+_TRUTHY_STRINGS = {"true", "yes", "y", "1", "نعم"}
+
+
+def _parse_bool(value):
+    """Tolerant bool parser: handles TRUE/FALSE, Yes/No, 1/0, plus blanks."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return bool(value)
+    if pd.isna(value):
+        return False
+    return str(value).strip().lower() in _TRUTHY_STRINGS
+
+
+def _normalize_name(name):
+    """Lower-cased, whitespace-collapsed name key for fallback matching."""
+    if name is None or pd.isna(name):
+        return ""
+    return " ".join(str(name).split()).lower()
+
+
+def _build_exclusion_rules(excluded_df):
+    """Parse the exclusion DataFrame into a list of rule dicts.
+
+    Each rule carries the resolved Employee ID (or None), the normalized
+    name for fallback matching, the human-readable reason / notes, and
+    the four boolean exclusion flags.
+    """
+    if excluded_df is None or excluded_df.empty:
+        return []
+
+    rules = []
+    for _, row in excluded_df.iterrows():
+        eid = None
+        raw_id = row.get("Employee ID")
+        if pd.notna(raw_id):
+            try:
+                eid = int(raw_id)
+            except (ValueError, TypeError):
+                eid = None
+        raw_name = row.get("Employee Name")
+        rules.append({
+            "id": eid,
+            "original_name": None if pd.isna(raw_name) else str(raw_name),
+            "normalized_name": _normalize_name(raw_name),
+            "reason": "" if pd.isna(row.get("Exclusion Reason")) else str(row.get("Exclusion Reason")),
+            "notes": "" if pd.isna(row.get("Notes")) else str(row.get("Notes")),
+            "flags": {
+                "excluded_from_late": _parse_bool(row.get("Exclude From Late")),
+                "excluded_from_overtime": _parse_bool(row.get("Exclude From Overtime")),
+                "excluded_from_payroll": _parse_bool(row.get("Exclude From Payroll Deduction")),
+                "excluded_from_risk": _parse_bool(row.get("Exclude From Risk Scoring")),
+            },
+        })
+    return rules
+
+
+def _match_exclusion(employee_id, first_name, rules, allow_name_match):
+    """Return the matching rule (or None). ID match takes priority.
+
+    Rules that carry an Employee ID apply ONLY by ID -- the Name on
+    those rules is informational. Name matching is a fallback used
+    only by rules with no Employee ID.
+    """
+    for rule in rules:
+        if rule["id"] is not None and rule["id"] == employee_id:
+            return rule
+    if allow_name_match:
+        target = _normalize_name(first_name)
+        if target:
+            for rule in rules:
+                if rule["id"] is not None:
+                    continue
+                if rule["normalized_name"] and rule["normalized_name"] == target:
+                    return rule
+    return None
 
 
 def _delay_minutes(punch_time, shift_start):
@@ -446,6 +527,88 @@ def _attach_department(daily, df):
     return daily
 
 
+def _attach_exclusion_info(daily, excluded_df, allow_name_match=ALLOW_NAME_BASED_EXCLUSION_MATCH):
+    """Stamp each daily row with the four exclusion flags + reason.
+
+    Non-excluded rows get is_excluded=False and every flag False. Raw
+    operational columns (attendance_status, overtime_minutes, etc.)
+    are left untouched so HR can still see what the employee did; only
+    downstream KPI aggregations honor the flags.
+    """
+    rules = _build_exclusion_rules(excluded_df)
+    columns = [
+        "is_excluded", "exclusion_reason",
+        "excluded_from_late", "excluded_from_overtime",
+        "excluded_from_payroll", "excluded_from_risk",
+    ]
+
+    if not rules:
+        daily["is_excluded"] = False
+        daily["exclusion_reason"] = ""
+        for col in ("excluded_from_late", "excluded_from_overtime",
+                    "excluded_from_payroll", "excluded_from_risk"):
+            daily[col] = False
+        return daily
+
+    def _row(row):
+        rule = _match_exclusion(
+            row["Employee ID"], row["First Name"], rules, allow_name_match
+        )
+        if rule is None:
+            return pd.Series({c: (False if c != "exclusion_reason" else "") for c in columns})
+        flags = rule["flags"]
+        return pd.Series({
+            "is_excluded": any(flags.values()),
+            "exclusion_reason": rule["reason"],
+            "excluded_from_late": flags["excluded_from_late"],
+            "excluded_from_overtime": flags["excluded_from_overtime"],
+            "excluded_from_payroll": flags["excluded_from_payroll"],
+            "excluded_from_risk": flags["excluded_from_risk"],
+        })
+
+    result = daily.apply(_row, axis=1)
+    for col in columns:
+        daily[col] = result[col]
+    return daily
+
+
+def _build_excluded_employees_summary(daily, excluded_df, allow_name_match=ALLOW_NAME_BASED_EXCLUSION_MATCH):
+    """One row per entry in the exclusion file, joined with the
+    operational record count from daily so HR sees the policy + reality."""
+    rules = _build_exclusion_rules(excluded_df)
+    if not rules:
+        return pd.DataFrame()
+
+    counts = daily.groupby("Employee ID").size().to_dict()
+    name_to_id = {}
+    if allow_name_match:
+        name_to_id = (
+            daily.dropna(subset=["First Name"])
+            .assign(_norm=lambda d: d["First Name"].astype(str).apply(_normalize_name))
+            .groupby("_norm")["Employee ID"]
+            .first()
+            .to_dict()
+        )
+
+    rows = []
+    for rule in rules:
+        eid = rule["id"]
+        if (eid is None or eid not in counts) and allow_name_match:
+            eid = name_to_id.get(rule["normalized_name"], eid)
+        rows.append({
+            "Employee ID": eid,
+            "Employee Name": rule["original_name"],
+            "Exclusion Reason": rule["reason"],
+            "Excluded From Late": rule["flags"]["excluded_from_late"],
+            "Excluded From Overtime": rule["flags"]["excluded_from_overtime"],
+            "Excluded From Payroll": rule["flags"]["excluded_from_payroll"],
+            "Excluded From Risk": rule["flags"]["excluded_from_risk"],
+            "Operational Records": int(counts.get(eid, 0)),
+            "Notes": rule["notes"],
+        })
+    return pd.DataFrame(rows)
+
+
 def _build_employee_summary(daily):
     """Per-employee risk + payroll summary.
 
@@ -469,6 +632,12 @@ def _build_employee_summary(daily):
                 lambda s: int((s == "Overtime").sum()),
             ),
             total_overtime_minutes=("overtime_minutes", "sum"),
+            is_excluded=("is_excluded", "any"),
+            exclusion_reason=("exclusion_reason", "first"),
+            excluded_from_late=("excluded_from_late", "any"),
+            excluded_from_overtime=("excluded_from_overtime", "any"),
+            excluded_from_payroll=("excluded_from_payroll", "any"),
+            excluded_from_risk=("excluded_from_risk", "any"),
         )
         .reset_index()
     )
@@ -477,6 +646,7 @@ def _build_employee_summary(daily):
         | (per_emp["missing_checkout_count"] > 0)
         | (per_emp["excuse_count"] > 0)
         | (per_emp["overtime_cases"] > 0)
+        | (per_emp["is_excluded"])
     ].copy()
 
     if per_emp.empty:
@@ -511,12 +681,22 @@ def _build_employee_summary(daily):
     per_emp["risk_level"] = risk_df["risk_level"]
     per_emp["risk_reason"] = risk_df["risk_reason"]
 
+    # Risk exclusion: zero the score and mark the level as "Excluded".
+    excluded_risk_mask = per_emp["excluded_from_risk"]
+    per_emp.loc[excluded_risk_mask, "risk_score"] = 0
+    per_emp.loc[excluded_risk_mask, "risk_level"] = "Excluded"
+
     per_emp["estimated_deduction"] = (
         per_emp["total_late_minutes"] * LATE_MINUTE_COST
     ).round(2)
     per_emp["deduction_capped"] = (
         per_emp["estimated_deduction"].clip(upper=MAX_MONTHLY_DEDUCTION).round(2)
     )
+
+    # Payroll exclusion: zero out both deduction fields.
+    excluded_payroll_mask = per_emp["excluded_from_payroll"]
+    per_emp.loc[excluded_payroll_mask, "estimated_deduction"] = 0.0
+    per_emp.loc[excluded_payroll_mask, "deduction_capped"] = 0.0
 
     column_order = [
         "Employee ID", "First Name",
@@ -525,6 +705,9 @@ def _build_employee_summary(daily):
         "overtime_cases", "total_overtime_minutes", "total_overtime_hours",
         "risk_score", "risk_level", "risk_reason",
         "estimated_deduction", "deduction_capped",
+        "is_excluded", "exclusion_reason",
+        "excluded_from_late", "excluded_from_overtime",
+        "excluded_from_payroll", "excluded_from_risk",
     ]
     return (
         per_emp[column_order]
@@ -613,8 +796,15 @@ def _build_daily_trend(daily):
 
 
 def _build_top_overtime_employees(daily):
-    """Per-employee overtime aggregates, sorted by total minutes desc."""
-    ot_rows = daily[daily["overtime_status"] == "Overtime"]
+    """Per-employee overtime aggregates, sorted by total minutes desc.
+
+    Excluded-from-overtime rows are filtered out so the chart reflects
+    the management view of who is genuinely earning overtime.
+    """
+    ot_rows = daily[
+        (daily["overtime_status"] == "Overtime")
+        & (~daily.get("excluded_from_overtime", False))
+    ]
     if ot_rows.empty:
         return pd.DataFrame(
             columns=[
@@ -852,7 +1042,7 @@ def _build_employee_reconciliation_details(df, schedules_df, daily):
     return all_emp.sort_values("Employee ID").reset_index(drop=True)
 
 
-def calculate_metrics(df, schedules_df, time_off_df=None):
+def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     shift_lookup = _build_shift_lookup(schedules_df)
     shift_end_lookup = _build_shift_end_lookup(schedules_df)
     daily = _build_daily_attendance(df, shift_lookup)
@@ -860,8 +1050,14 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     daily = _attach_checkout_info(daily, df)
     daily = _attach_overtime_info(daily, shift_end_lookup)
     daily = _attach_department(daily, df)
+    daily = _attach_exclusion_info(daily, excluded_df)
 
-    late_rows = daily[daily["attendance_status"] == "Late"]
+    # KPI aggregates honor exclusions. Raw daily rows remain untouched
+    # so HR can still inspect what each employee did.
+    late_rows = daily[
+        (daily["attendance_status"] == "Late")
+        & (~daily["excluded_from_late"])
+    ]
     status_summary = _build_status_summary(daily)
     excused_vs_unexcused = _build_excused_vs_unexcused(daily)
     employee_summary = _build_employee_summary(daily)
@@ -877,7 +1073,10 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     employee_master = _build_employee_master(df, schedules_df, daily)
     top_overtime_employees = _build_top_overtime_employees(daily)
 
-    overtime_rows = daily[daily["overtime_status"] == "Overtime"]
+    overtime_rows = daily[
+        (daily["overtime_status"] == "Overtime")
+        & (~daily["excluded_from_overtime"])
+    ]
     overtime_cases = int(len(overtime_rows))
     total_overtime_minutes = int(overtime_rows["overtime_minutes"].sum())
     total_overtime_hours = round(total_overtime_minutes / 60, 1)
@@ -885,6 +1084,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
     avg_overtime_minutes = (
         int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
     )
+    excluded_employees_summary = _build_excluded_employees_summary(daily, excluded_df)
 
     schedule_names = set(schedules_df["Name"].dropna().astype(str).str.strip())
     orphan_attendance_records = int(
@@ -959,5 +1159,9 @@ def calculate_metrics(df, schedules_df, time_off_df=None):
         "employee_reconciliation_details": reconciliation_details,
         "employee_master": employee_master,
         "top_overtime_employees": top_overtime_employees,
+        "excluded_employees_summary": excluded_employees_summary,
+        "excluded_employee_count": int(
+            daily.loc[daily["is_excluded"], "Employee ID"].nunique()
+        ),
     }
     return summary, daily

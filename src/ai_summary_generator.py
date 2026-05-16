@@ -15,14 +15,16 @@ Sections (in order):
    9. HR Audit Flags              (employees flagged for chronic late,
                                    missing checkouts, excessive excuses,
                                    no schedule, anomalies)
-  10. Overtime Analysis           (counts, hours, top overtime employees)
-  11. Department Summary          (only when department data is present)
-  12. Approved Excuse Records
-  13. Missing Punch Analysis
-  14. Employees Missing Working Schedule
-  15. Late Attendance Records
-  16. Business Logic Notes
-  17. Instructions for Claude
+  10. Excluded Employees          (policy exclusions from KPIs while
+                                   operational data stays visible)
+  11. Overtime Analysis           (counts, hours, top overtime employees)
+  12. Department Summary          (only when department data is present)
+  13. Approved Excuse Records
+  14. Missing Punch Analysis
+  15. Employees Missing Working Schedule
+  16. Late Attendance Records
+  17. Business Logic Notes
+  18. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -313,6 +315,22 @@ def generate_ai_input_file(metrics, attendance_daily):
         )
 
         _write_hr_audit_flags(f, metrics)
+
+        excluded_summary = metrics.get("excluded_employees_summary")
+        f.write("\n\n## Excluded Employees\n")
+        f.write(
+            "Excluded employees remain visible in the raw operational "
+            "data (Daily Attendance, Daily Trend) so HR can still see "
+            "what they did, but their rows are dropped from the "
+            "management KPIs (late_cases, overtime_cases, payroll "
+            "deduction, risk scoring) according to the per-employee "
+            "exclusion flags. Exclusions are policy decisions sourced "
+            "from `data/excluded_employees.xlsx`.\n\n"
+        )
+        if excluded_summary is None or excluded_summary.empty:
+            f.write("_No exclusions configured for this period._\n")
+        else:
+            f.write(excluded_summary.to_markdown(index=False))
 
         f.write("\n\n## Overtime Analysis\n")
         ot_cases = metrics.get("overtime_cases", 0)

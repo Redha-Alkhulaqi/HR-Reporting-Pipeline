@@ -41,3 +41,11 @@ MAX_MONTHLY_DEDUCTION = float(os.getenv("MAX_MONTHLY_DEDUCTION", "500.0"))
 #   discarded (set 0 to count every minute beyond the grace).
 OVERTIME_GRACE_MINUTES = int(os.getenv("OVERTIME_GRACE_MINUTES", "15"))
 MIN_OVERTIME_MINUTES = int(os.getenv("MIN_OVERTIME_MINUTES", "30"))
+
+# Employee exclusions. When the exclusion file lacks an Employee ID for
+# a row, fall back to matching the row's normalized Employee Name
+# against the attendance file. Disable for stricter ID-only matching.
+ALLOW_NAME_BASED_EXCLUSION_MATCH = (
+    os.getenv("ALLOW_NAME_BASED_EXCLUSION_MATCH", "true").lower()
+    in ("true", "1", "yes")
+)

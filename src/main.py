@@ -26,6 +26,7 @@ from ai_summary_generator import generate_ai_input_file
 from config import LOG_LEVEL, PROJECT_ROOT
 from data_loader import (
     load_attendance_file,
+    load_excluded_employees_file,
     load_time_off_file,
     load_working_schedule_file,
 )
@@ -120,9 +121,13 @@ def main(argv=None):
             PROJECT_ROOT
             / "data/Time Off Custom - Simplified Duration Calculation (hr.leave).xlsx"
         )
+        excluded_df = load_excluded_employees_file(
+            PROJECT_ROOT / "data/excluded_employees.xlsx"
+        )
         logger.info(
             f"Input files loaded: attendance={len(df)} schedules={len(schedules_df)} "
-            f"time_off={len(time_off_df) if time_off_df is not None else 0}"
+            f"time_off={len(time_off_df) if time_off_df is not None else 0} "
+            f"exclusions={len(excluded_df)}"
         )
 
         if args.from_date or args.to_date:
@@ -137,7 +142,9 @@ def main(argv=None):
         _log_validation(validate_schedules(schedules_df))
         _log_validation(validate_time_off(time_off_df))
 
-        summary, daily = calculate_metrics(df, schedules_df, time_off_df)
+        summary, daily = calculate_metrics(
+            df, schedules_df, time_off_df, excluded_df=excluded_df
+        )
         logger.info(
             f"Metrics computed: daily_rows={len(daily)} "
             f"late={summary['late_cases']} "
@@ -146,6 +153,7 @@ def main(argv=None):
             f"missing_schedule={summary['missing_schedule_cases']} "
             f"missing_checkout={summary['missing_check_out_cases']} "
             f"high_risk={summary.get('high_risk_employees', 0)} "
+            f"excluded={summary.get('excluded_employee_count', 0)} "
             f"data_quality_score={summary.get('data_quality_score', 'n/a')}"
         )
 

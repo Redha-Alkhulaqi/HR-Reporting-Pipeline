@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-05-16 (Employee exclusion rules)
+- Added optional `data/excluded_employees.xlsx` input with columns
+  `Employee ID, Employee Name, Exclusion Reason, Exclude From Late,
+  Exclude From Overtime, Exclude From Payroll Deduction,
+  Exclude From Risk Scoring, Notes`. Loader returns an empty
+  DataFrame when the file is absent so the feature is no-op by default.
+- Added `load_excluded_employees_file` in data_loader.
+- Added an exclusion engine in metrics_calculator that stamps every
+  daily row with `is_excluded`, `exclusion_reason`,
+  `excluded_from_late`, `excluded_from_overtime`,
+  `excluded_from_payroll`, `excluded_from_risk`. Raw operational rows
+  are NOT mutated -- only KPI aggregations honor the flags.
+- KPI filters: `late_cases` / `total_late_minutes` drop rows where
+  `excluded_from_late`; `overtime_cases` / `total_overtime_minutes`
+  / `top_overtime_employees` drop rows where `excluded_from_overtime`;
+  per-employee `estimated_deduction` / `deduction_capped` zero out
+  when `excluded_from_payroll`; per-employee `risk_score` becomes 0
+  and `risk_level` becomes `"Excluded"` when `excluded_from_risk`.
+- Matching: Employee ID is the primary key. Rules without an ID fall
+  back to normalized-name matching (lower-cased and whitespace-
+  collapsed). Configurable via `ALLOW_NAME_BASED_EXCLUSION_MATCH`.
+- Added an `excluded_employees_summary` DataFrame surfaced as a new
+  `Excluded Employees` sheet in Excel and a new `## Excluded
+  Employees` section in the Claude markdown.
+- Added `tests/test_exclusions.py` covering ID-based, name-based,
+  mixed-flag, and ID-over-name-priority cases (8 new tests; 42 total).
+- Added `ALLOW_NAME_BASED_EXCLUSION_MATCH` to `config.py`.
+
 ## 2026-05-16 (Overtime analytics)
 - Added `extract_shift_end` that pulls the Shift End from Odoo
   Working Time labels (uses the LAST end token for split shifts).

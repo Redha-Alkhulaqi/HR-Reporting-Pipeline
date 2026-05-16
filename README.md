@@ -29,6 +29,11 @@ report.
 - Validation layer that surfaces invalid dates, unexpected punch
   states, duplicate rows, etc. via the log.
 - Output versioning under `outputs/YYYY-MM/`.
+- Policy-driven employee exclusions from
+  `data/excluded_employees.xlsx` (owners, executives, exempt staff).
+  Each entry can independently exclude an employee from the Late,
+  Overtime, Payroll, and Risk Scoring KPIs while keeping every
+  operational row visible.
 - Employee Master + HR Audit Flags (chronic lateness, repeated missing
   checkouts, excessive excuses, no assigned schedule, attendance
   anomalies) on every employee.
@@ -52,6 +57,7 @@ The pipeline reads three files from `data/`:
 | `attendance_raw.xlsx` | BioTime export | Punch events (one row per punch). |
 | `Resources (resource.resource).xlsx` | Odoo `resource.resource` | Per-employee Working Time labels (used to derive shift start). |
 | `Time Off Custom - Simplified Duration Calculation (hr.leave).xlsx` | Odoo `hr.leave` | Approved leaves and hourly excuses. |
+| `excluded_employees.xlsx` (optional) | manual policy file | Owners, executives, and exempt staff to drop from KPI totals. |
 
 Place each new month's export in `data/` and re-run the pipeline.
 

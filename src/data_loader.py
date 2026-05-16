@@ -23,3 +23,24 @@ def load_working_schedule_file(file_path):
 
 def load_time_off_file(file_path):
     return _load_table(file_path, "time off file")
+
+
+_EXCLUSION_COLUMNS = [
+    "Employee ID", "Employee Name", "Exclusion Reason",
+    "Exclude From Late", "Exclude From Overtime",
+    "Exclude From Payroll Deduction", "Exclude From Risk Scoring",
+    "Notes",
+]
+
+
+def load_excluded_employees_file(file_path):
+    """Load policy-driven employee exclusions.
+
+    The file is OPTIONAL. When it is missing we return an empty
+    DataFrame with the expected schema so callers can treat the
+    feature as a no-op without special-casing None.
+    """
+    if not file_path.exists():
+        print(f"No exclusion file at {file_path}; proceeding without exclusions.")
+        return pd.DataFrame(columns=_EXCLUSION_COLUMNS)
+    return _load_table(file_path, "exclusion file")

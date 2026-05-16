@@ -309,6 +309,12 @@ def export_report(summary, daily):
             ]],
         )
 
+    excluded_summary = summary.get("excluded_employees_summary")
+    if excluded_summary is not None and not excluded_summary.empty:
+        _build_data_sheet(
+            wb.create_sheet("Excluded Employees"), excluded_summary
+        )
+
     # Build Dashboard LAST so it can reference positions on the other sheets.
     _build_dashboard(wb, summary)
 
