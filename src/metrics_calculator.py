@@ -3,7 +3,8 @@
 Inputs
 - df            : BioTime punches export. One row per punch event.
                   Required columns: Employee ID, First Name, Date,
-                  Punch Time, Punch State.
+                  Punch Time, Punch State. Optional: Department
+                  (or Department Name / Work Location / Company).
 - schedules_df  : Odoo resource.resource export. One row per employee.
                   Required columns: Name, Working Time.
 - time_off_df   : Optional Odoo hr.leave export. One row per leave
@@ -12,8 +13,10 @@ Inputs
                   Status == "Approved" are honored.
 
 Output of calculate_metrics
-- summary : dict of KPI scalars plus three DataFrames:
-            employee_summary, status_summary, excused_vs_unexcused.
+- summary : dict of KPI scalars plus these DataFrames (each may be None
+            or empty when its source data is unavailable):
+              employee_summary, status_summary, excused_vs_unexcused,
+              department_summary, missing_punch_summary, daily_trend.
 - daily   : DataFrame, one row per (Employee ID, Date). See schema below.
 
 Daily DataFrame schema
@@ -26,7 +29,11 @@ Daily DataFrame schema
   time_off_type (str or None  -- the type that classified the row),
   attendance_status (str: Late | On Time | Approved Excuse | Leave |
                      Missing Schedule),
-  is_late (bool: attendance_status == "Late", kept for back compat).
+  is_late (bool: attendance_status == "Late", kept for back compat),
+  Check Out (HH:MM:SS or NaN  -- latest Check Out punch that day),
+  has_check_out (bool), missing_check_out (bool),
+  Department (str or NaN  -- only populated when a department column
+              was detected in the source).
 
 Status classification (HR_REPORTING_RULES_MASTER rules 3, 5, 6)
 - Missing Schedule : employee absent from the resources export.
@@ -60,6 +67,11 @@ _EXCUSE_KEYWORDS = ("استأذان", "استئذان", "excuse", "permission")
 
 _SHIFT_TIME_RE = re.compile(r"\((\d{1,2}:\d{2}\s*[AP]M)", re.IGNORECASE)
 
+# Source columns that we accept as the employee's department / org unit.
+_DEPARTMENT_COL_CANDIDATES = (
+    "Department", "Department Name", "Work Location", "Company",
+)
+
 
 def extract_shift_start(working_time):
     """Pull the first HH:MMAM/PM token from an Odoo Working Time label."""
@@ -91,6 +103,13 @@ def _delay_minutes(punch_time, shift_start):
     return int((check_in - shift_start_time).total_seconds() / 60)
 
 
+def _find_column(df, candidates):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
 def _build_shift_lookup(schedules_df):
     """Return dict: cleaned employee name -> Shift Start (HH:MM)."""
     schedules = schedules_df[["Name", "Working Time"]].copy()
@@ -115,16 +134,12 @@ def _build_daily_attendance(df, shift_lookup):
 
     daily["Shift Start"] = daily["First Name"].map(shift_lookup)
     daily["missing_schedule"] = daily["Shift Start"].isna()
-
-    # Employees not listed in the schedules file have no Shift Start; we
-    # cannot compute lateness for them, so leave their delay at 0.
     daily["Delay Minutes"] = daily.apply(
         lambda row: _delay_minutes(row["Check In"], row["Shift Start"])
         if pd.notna(row["Shift Start"])
         else 0,
         axis=1,
     )
-
     daily["Check DateTime"] = pd.to_datetime(
         daily["Date"].astype(str) + " " + daily["Check In"].astype(str)
     )
@@ -132,11 +147,7 @@ def _build_daily_attendance(df, shift_lookup):
 
 
 def _build_approved_leaves(time_off_df):
-    """Return dict: cleaned employee name -> list of (start, end, type, is_excuse).
-
-    Hoisting the filter, strip, and date parsing out of the per-row apply
-    turns an O(D x L) cost into O(L) prep plus O(D) lookups.
-    """
+    """Return dict: cleaned employee name -> list of (start, end, type, is_excuse)."""
     if time_off_df is None or time_off_df.empty:
         return {}
 
@@ -219,6 +230,42 @@ def _attach_attendance_status(daily, time_off_df):
     return daily
 
 
+def _attach_checkout_info(daily, df):
+    """Merge each day's latest Check Out punch into daily. Adds Check Out,
+    has_check_out, missing_check_out columns."""
+    checkouts = df[df["Punch State"] == "Check Out"]
+    if checkouts.empty:
+        daily["Check Out"] = pd.NA
+    else:
+        per_day_checkout = (
+            checkouts.groupby(["Employee ID", "Date"])["Punch Time"]
+            .max()
+            .reset_index()
+            .rename(columns={"Punch Time": "Check Out"})
+        )
+        daily = daily.merge(per_day_checkout, on=["Employee ID", "Date"], how="left")
+    daily["has_check_out"] = daily["Check Out"].notna()
+    daily["missing_check_out"] = ~daily["has_check_out"]
+    return daily
+
+
+def _attach_department(daily, df):
+    """Map a Department column onto daily when source data exposes one."""
+    dept_col = _find_column(df, _DEPARTMENT_COL_CANDIDATES)
+    if dept_col is None:
+        daily["Department"] = pd.NA
+        return daily
+    emp_to_dept = (
+        df[["Employee ID", dept_col]]
+        .dropna()
+        .drop_duplicates("Employee ID")
+        .set_index("Employee ID")[dept_col]
+        .to_dict()
+    )
+    daily["Department"] = daily["Employee ID"].map(emp_to_dept)
+    return daily
+
+
 def _build_employee_summary(daily):
     late_rows = daily[daily["attendance_status"] == "Late"]
     employee_summary = (
@@ -269,30 +316,82 @@ def _build_excused_vs_unexcused(daily):
     )
 
 
+def _aggregate_status_counts(daily, group_col):
+    """Group daily by group_col and return per-status counts + unexcused sums."""
+    work = daily[[group_col, "attendance_status", "unexcused_delay_minutes"]].copy()
+    work["total_records"] = 1
+    for status, col in (
+        ("Late", "late_cases"),
+        ("Approved Excuse", "approved_excuse_cases"),
+        ("Leave", "leave_cases"),
+        ("Missing Schedule", "missing_schedule_cases"),
+    ):
+        work[col] = (work["attendance_status"] == status).astype(int)
+    return (
+        work.groupby(group_col, dropna=True)
+        .agg(
+            total_records=("total_records", "sum"),
+            late_cases=("late_cases", "sum"),
+            approved_excuse_cases=("approved_excuse_cases", "sum"),
+            leave_cases=("leave_cases", "sum"),
+            missing_schedule_cases=("missing_schedule_cases", "sum"),
+            total_unexcused_delay_minutes=("unexcused_delay_minutes", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def _build_department_summary(daily):
+    if "Department" not in daily.columns or daily["Department"].isna().all():
+        return None
+    grp = _aggregate_status_counts(daily, "Department")
+    grp["total_unexcused_delay_minutes"] = grp["total_unexcused_delay_minutes"].astype(int)
+    return grp.sort_values("late_cases", ascending=False).reset_index(drop=True)
+
+
+def _build_missing_punch_summary(daily):
+    rows = daily[daily["missing_check_out"]]
+    cols = ["Employee ID", "First Name", "Date", "Check In", "Shift Start"]
+    if rows.empty:
+        return pd.DataFrame(columns=cols)
+    return rows[cols].copy().reset_index(drop=True)
+
+
+def _build_daily_trend(daily):
+    grp = _aggregate_status_counts(daily, "Date")
+    grp["total_unexcused_delay_minutes"] = grp["total_unexcused_delay_minutes"].astype(int)
+    return grp.sort_values("Date").reset_index(drop=True)
+
+
 def calculate_metrics(df, schedules_df, time_off_df=None):
     shift_lookup = _build_shift_lookup(schedules_df)
     daily = _build_daily_attendance(df, shift_lookup)
     daily = _attach_attendance_status(daily, time_off_df)
+    daily = _attach_checkout_info(daily, df)
+    daily = _attach_department(daily, df)
 
     late_rows = daily[daily["attendance_status"] == "Late"]
     status_summary = _build_status_summary(daily)
     excused_vs_unexcused = _build_excused_vs_unexcused(daily)
     employee_summary = _build_employee_summary(daily)
+    department_summary = _build_department_summary(daily)
+    missing_punch_summary = _build_missing_punch_summary(daily)
+    daily_trend = _build_daily_trend(daily)
 
     summary = {
         "total_employees": int(df["Employee ID"].nunique()),
         "late_cases": int(len(late_rows)),
         "total_late_minutes": int(late_rows["unexcused_delay_minutes"].sum()),
-        "approved_excuse_cases": int(
-            (daily["attendance_status"] == "Approved Excuse").sum()
-        ),
+        "approved_excuse_cases": int((daily["attendance_status"] == "Approved Excuse").sum()),
         "leave_cases": int((daily["attendance_status"] == "Leave").sum()),
-        "missing_schedule_cases": int(
-            (daily["attendance_status"] == "Missing Schedule").sum()
-        ),
+        "missing_schedule_cases": int((daily["attendance_status"] == "Missing Schedule").sum()),
+        "missing_check_out_cases": int(daily["missing_check_out"].sum()),
         "excused_delay_minutes": int(daily["excused_delay_minutes"].sum()),
         "employee_summary": employee_summary,
         "status_summary": status_summary,
         "excused_vs_unexcused": excused_vs_unexcused,
+        "department_summary": department_summary,
+        "missing_punch_summary": missing_punch_summary,
+        "daily_trend": daily_trend,
     }
     return summary, daily

@@ -1,59 +1,118 @@
 # HR Reporting Pipeline
 
-Centralized HR reporting and analytics pipeline covering attendance, payroll, leaves, and workforce insights.
+Monthly HR attendance pipeline that ingests BioTime punches and Odoo
+metadata, classifies each employee day, and produces an Excel dashboard
+plus a Markdown brief sized for an LLM (Claude) to draft the monthly
+report.
 
-## Repository Layout
+## Current Features
 
-```
-.
-├── src/                                  # Python source code
-│   └── main.py
-├── docs/                                 # Architecture & business-rules docs
-│   └── hr_reporting_pipeline_docs_templates.md
-├── CLAUDE_MONTHLY_HR_REPORT_PROMPT.md    # Claude prompt for monthly report
-├── HR_REPORTING_RULES_MASTER.md          # Master reporting rules
-├── MONTHLY_HR_REPORTING_WORKFLOW.md      # Monthly workflow steps
-├── HR_Monthly_Report_Template.xlsx       # Excel template
-├── requirements.txt                      # Python dependencies
-└── .gitignore
-```
+- Per-employee shift handling using the Odoo `resource.resource` export
+  (no single fixed shift).
+- Attendance status classification with five values:
+  `Late`, `On Time`, `Approved Excuse`, `Leave`, `Missing Schedule`.
+- Partial hourly excuse handling (overlap between the delay window and
+  the approved excuse window).
+- Excused vs unexcused delay accounting.
+- Per-employee risk tiering (`Low / Medium / High Risk`).
+- Department-level aggregation when a Department column is detected.
+- Missing Check-Out detection (days with a Check In but no Check Out).
+- Daily attendance trend.
+- Multi-sheet Excel report with embedded dashboard charts.
+- Claude-ready Markdown brief documenting every section.
 
-## Getting Started
+## Input Files
 
-### 1. Prerequisites
-- Python 3.10+
-- Git
+The pipeline reads three files from `data/`:
 
-### 2. Setup
+| File | Source | Purpose |
+|---|---|---|
+| `attendance_raw.xlsx` | BioTime export | Punch events (one row per punch). |
+| `Resources (resource.resource).xlsx` | Odoo `resource.resource` | Per-employee Working Time labels (used to derive shift start). |
+| `Time Off Custom - Simplified Duration Calculation (hr.leave).xlsx` | Odoo `hr.leave` | Approved leaves and hourly excuses. |
+
+Place each new month's export in `data/` and re-run the pipeline.
+
+## Output Files
+
+Written to `outputs/` (created if absent):
+
+- `hr_report_YYYYMMDD_HHMMSS.xlsx` — multi-sheet Excel report:
+  - **Dashboard** — KPIs, status / excused tables, charts.
+  - **Employee Summary** — per-employee late aggregates + risk tier.
+  - **Daily Attendance** — every classified employee-day row.
+  - **Daily Trend** — per-date counts and unexcused minutes.
+  - **Missing Punches** — days with a Check In but no Check Out (optional).
+  - **Department Summary** — per-department breakdown (optional).
+- `claude_hr_report_input.md` — Markdown brief consumed by Claude.
+
+## Attendance Status Logic
+
+For each `(Employee ID, Date)` row:
+
+1. **Missing Schedule** — employee not in the Odoo resources export.
+   Lateness cannot be computed; reported separately for manual review.
+2. **Leave** — an approved LEAVE (Annual / Sick / etc.) whose window
+   covers the check-in moment. Leave wins over Excuse per priority.
+3. **Approved Excuse / Late** — approved EXCUSES
+   (`استأذان`, `Permission`, etc.) reduce the delay by the overlap
+   between `(Shift Start → Check In)` and `(Excuse Start → Excuse End)`.
+   - If the residual unexcused delay > `GRACE_MINUTES` (15) → **Late**.
+   - Else, if any excuse contributed → **Approved Excuse**.
+4. **On Time** — everything else (including delays inside the grace
+   period and early arrivals).
+
+`late_cases` and `total_late_minutes` count only **Late** rows; excused
+minutes never flow into `total_late_minutes`.
+
+## How to Run
 
 ```powershell
-# Clone the repository
-git clone https://github.com/Redha-Alkhulaqi/HR-Reporting-Pipeline.git
-cd HR-Reporting-Pipeline
-
-# Create and activate virtual environment
+# One-time setup
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-# Install dependencies
 pip install -r requirements.txt
-```
 
-### 3. Run
-
-```powershell
+# Drop the three monthly export files into data/, then:
 python src/main.py
 ```
 
+The script is CWD-independent (paths are resolved from `PROJECT_ROOT`).
+
+## How to Validate Results
+
+1. **Pipeline ran clean** — last console line is
+   `Pipeline completed successfully.` Logs land in `logs/pipeline.log`.
+2. **Excel exists** in `outputs/` and opens with these sheets:
+   `Dashboard`, `Employee Summary`, `Daily Attendance`, `Daily Trend`,
+   plus `Missing Punches` and `Department Summary` when applicable.
+3. **Numbers reconcile**:
+   - `Dashboard → Late Cases` equals row count of
+     `Daily Attendance` where `attendance_status == Late`.
+   - `Dashboard → Total Late Minutes (Unexcused)` equals the sum of
+     `unexcused_delay_minutes` over those Late rows.
+   - `excused_delay_minutes` never contributes to `total_late_minutes`.
+4. **Spot-check classification** — open `claude_hr_report_input.md`,
+   check that "Approved Excuse Records" and "Late Attendance Records"
+   look sensible against the source punches.
+
+## Known Limitations
+
+- Overnight shifts that cross midnight are not specially handled. The
+  current data contains daytime and evening shifts only.
+- Department mapping uses the first non-null Department per
+  Employee ID. Employees that switch departments mid-month appear under
+  the first one seen.
+- Excuse detection is keyword-based on `Time Off Type`
+  (`استأذان` / `استئذان` / `excuse` / `permission`). Anything else with
+  `Status = Approved` is treated as a Leave.
+- The pipeline currently consumes static Excel exports; the
+  `src/odoo_client.py` XML-RPC scaffold is not yet wired into `main.py`.
+
 ## Documentation
 
-See [docs/hr_reporting_pipeline_docs_templates.md](docs/hr_reporting_pipeline_docs_templates.md) for:
-- Project roadmap
-- System architecture
-- Business rules
-- Attendance logic
-- Development plan
-
-## Monthly Workflow
-
-See [MONTHLY_HR_REPORTING_WORKFLOW.md](MONTHLY_HR_REPORTING_WORKFLOW.md) and [HR_REPORTING_RULES_MASTER.md](HR_REPORTING_RULES_MASTER.md).
+- [HR_REPORTING_RULES_MASTER.md](HR_REPORTING_RULES_MASTER.md) — master
+  reporting rules (lateness, leaves, status priorities).
+- [MONTHLY_HR_REPORTING_WORKFLOW.md](MONTHLY_HR_REPORTING_WORKFLOW.md) —
+  the monthly operating workflow.
+- [CHANGELOG.md](CHANGELOG.md) — release notes.

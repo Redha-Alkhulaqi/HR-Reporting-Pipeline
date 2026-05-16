@@ -1,15 +1,18 @@
 """Write the Claude-facing monthly HR Markdown input.
 
 Sections (in order):
-  1. Summary KPIs
-  2. Attendance Status Breakdown
-  3. Excused vs Unexcused Analysis
-  4. Top Late Employees
-  5. Approved Excuse Records
-  6. Employees Missing Working Schedule
-  7. Late Attendance Records
-  8. Business Logic Notes
-  9. Instructions for Claude
+   1. Summary KPIs
+   2. Attendance Status Breakdown
+   3. Excused vs Unexcused Analysis
+   4. Daily Trend
+   5. Top Late Employees
+   6. Department Summary           (only when department data is present)
+   7. Approved Excuse Records
+   8. Missing Punch Analysis
+   9. Employees Missing Working Schedule
+  10. Late Attendance Records
+  11. Business Logic Notes
+  12. Instructions for Claude
 """
 import pandas as pd
 
@@ -33,6 +36,9 @@ _BUSINESS_LOGIC_NOTES = """## Business Logic Notes
 - Employees absent from the Odoo resources export have no shift, so
   their lateness cannot be computed. They appear as Missing Schedule
   and require manual review.
+- Missing Punch flags days that recorded a Check In but no Check Out.
+  Per HR_REPORTING_RULES_MASTER rule 8, treat these as Missing Punch
+  only after attendance is finalized.
 - attendance_status values: Late, On Time, Approved Excuse, Leave,
   Missing Schedule. late_cases and total_late_minutes count only Late
   rows; excused minutes never flow into total_late_minutes.
@@ -48,10 +54,12 @@ The report should include:
 3. Late Arrival Analysis
 4. Approved Excuse vs Unexcused Late Analysis
 5. Leave and Permission Patterns
-6. Employee Attendance Risks
-7. Manual Review Items (Missing Schedule)
-8. HR Recommendations
-9. Action Plan for Next Month
+6. Department Comparison (if department data is provided)
+7. Daily Attendance Trend
+8. Missing Punch and Missing Schedule Manual Review Items
+9. Employee Attendance Risks
+10. HR Recommendations
+11. Action Plan for Next Month
 
 Tone: professional, concise, suitable for HR management.
 """
@@ -86,8 +94,8 @@ def generate_ai_input_file(metrics, attendance_daily):
 
         f.write("## Summary KPIs\n")
         for key, value in metrics.items():
-            # Skip DataFrames; they get their own sections below.
-            if isinstance(value, pd.DataFrame):
+            # Skip DataFrames (rendered in their own sections) and Nones.
+            if isinstance(value, pd.DataFrame) or value is None:
                 continue
             f.write(f"- {key}: {value}\n")
 
@@ -100,10 +108,22 @@ def generate_ai_input_file(metrics, attendance_daily):
             metrics.get("excused_vs_unexcused"), "No delay data.",
         )
         _write_section(
+            f, "Daily Trend",
+            metrics.get("daily_trend"), "No trend data.",
+        )
+        _write_section(
             f, "Top Late Employees",
             metrics.get("employee_summary"), "No late employees found.",
             head=20,
         )
+
+        # Department Summary — only when source data exposed a department col.
+        dept_summary = metrics.get("department_summary")
+        f.write("\n\n## Department Summary\n")
+        if dept_summary is None or dept_summary.empty:
+            f.write("Department column not available in the source data.\n")
+        else:
+            f.write(dept_summary.to_markdown(index=False))
 
         f.write("\n\n## Approved Excuse Records\n")
         if excuse_rows.empty:
@@ -115,6 +135,19 @@ def generate_ai_input_file(metrics, attendance_daily):
                 "threshold.\n\n"
             )
             f.write(excuse_rows.to_markdown(index=False))
+
+        # Missing Punch Analysis
+        missing_punches = metrics.get("missing_punch_summary")
+        f.write("\n\n## Missing Punch Analysis\n")
+        if missing_punches is None or missing_punches.empty:
+            f.write("No days with a missing Check Out punch.\n")
+        else:
+            f.write(
+                f"{len(missing_punches)} day(s) recorded a Check In but no "
+                "Check Out punch. Per HR_REPORTING_RULES_MASTER rule 8, "
+                "treat as Missing Punch only after attendance is finalized.\n\n"
+            )
+            f.write(missing_punches.to_markdown(index=False))
 
         f.write("\n\n## Employees Missing Working Schedule\n")
         if missing_schedule_rows.empty:
