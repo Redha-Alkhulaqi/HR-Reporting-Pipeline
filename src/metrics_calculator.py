@@ -49,6 +49,7 @@ def calculate_metrics(df, schedules_df):
     )
 
     daily["Shift Start"] = daily["First Name"].map(name_to_shift)
+    daily["missing_schedule"] = daily["Shift Start"].isna()
 
     # Employees not listed in the schedules file have no Shift Start; we
     # cannot compute lateness for them, so leave their delay at 0.

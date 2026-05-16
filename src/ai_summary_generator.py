@@ -9,6 +9,14 @@ def generate_ai_input_file(metrics, attendance_daily):
     late_employees = attendance_daily[attendance_daily["is_late"]]
     employee_summary = metrics.get("employee_summary")
 
+    missing_schedule_employees = (
+        attendance_daily[attendance_daily["missing_schedule"]][
+            ["Employee ID", "First Name"]
+        ]
+        .drop_duplicates()
+        .sort_values("First Name")
+    )
+
     with open(file_path, "w", encoding="utf-8") as f:
         f.write("# Monthly HR Attendance Report Input\n\n")
 
@@ -23,6 +31,16 @@ def generate_ai_input_file(metrics, attendance_daily):
             f.write(employee_summary.head(20).to_markdown(index=False))
         else:
             f.write("No late employees found.\n")
+
+        f.write("\n\n## Employees Missing Working Schedule\n")
+        if missing_schedule_employees.empty:
+            f.write("All employees have an assigned working schedule.\n")
+        else:
+            f.write(
+                "These employees are not present in the Odoo resources file, "
+                "so their lateness could not be computed. Manual review required.\n\n"
+            )
+            f.write(missing_schedule_employees.to_markdown(index=False))
 
         f.write("\n\n## Late Attendance Records\n")
         if late_employees.empty:
