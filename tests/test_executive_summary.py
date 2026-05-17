@@ -126,6 +126,46 @@ def test_absence_days_counts_working_days_employee_missed():
     assert zain["No of Absence Days"] == 0
 
 
+def test_friday_off_days_are_not_counted_as_absence():
+    """ALI works Sat-Thu; Fridays are weekly off. Even though a
+    colleague checks in on the Fridays (so Fridays appear in the
+    reporting period), ALI's missing Fridays must NOT count as
+    absences."""
+    rows = []
+    # ALI works every Sat-Thu between 2026-05-02 and 2026-05-14.
+    ali_dates = [
+        "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05",
+        "2026-05-06", "2026-05-07",
+        "2026-05-09", "2026-05-10", "2026-05-11", "2026-05-12",
+        "2026-05-13", "2026-05-14",
+    ]
+    for d in ali_dates:
+        rows.append(_punch(1, "ALI-EMP1", d, "08:00:00", "Check In"))
+        rows.append(_punch(1, "ALI-EMP1", d, "17:00:00", "Check Out"))
+    # ZAIN works the two Fridays so they enter the reporting period.
+    for d in ("2026-05-01", "2026-05-08"):
+        rows.append(_punch(2, "ZAIN-EMP2", d, "08:00:00", "Check In"))
+        rows.append(_punch(2, "ZAIN-EMP2", d, "17:00:00", "Check Out"))
+    df = pd.DataFrame(rows)
+    schedules = pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+        {"Name": "ZAIN-EMP2", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+    summary, _ = calculate_metrics(df, schedules)
+    exec_df = summary["executive_employee_summary"]
+    ali = exec_df[exec_df["Employee ID"] == 1].iloc[0]
+    assert ali["No of Absence Days"] == 0
+
+    # And the audit ledger explains it.
+    details = summary["absence_details"]
+    ali_fridays = details[
+        (details["Employee ID"] == 1)
+        & (details["Weekday"] == "Friday")
+    ]
+    assert (ali_fridays["Counted As Absence"] == False).all()  # noqa: E712
+    assert (ali_fridays["Is Weekly Off"] == True).all()  # noqa: E712
+
+
 def test_approved_leave_does_not_count_as_absence():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),

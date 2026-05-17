@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-05-17 (Fix absence count to exclude weekly off days)
+- Fixed `No of Absence Days` wrongly counting weekly off days. Real
+  example before the fix: REDHA ALI AHMED ALKHULAQI-EMP389 showed 3
+  absences for 2026-05-01 / 08 / 15 -- all Fridays. With the fix
+  REDHA's count is 0.
+- Added config:
+    WEEKLY_OFF_DAYS = ["Friday"]
+    PUBLIC_HOLIDAYS = []        # YYYY-MM-DD list, env-overridable
+- Replaced the date-arithmetic `_compute_absence_days` with an
+  audited two-step flow:
+    1. `_build_absence_details(daily, schedules_df, time_off_df)` --
+       per (employee, date) ledger.
+    2. `_absence_counts_from_details(details)` -- sums where
+       `Counted As Absence == True`.
+- A day is counted as absence only when:
+    * the employee has an Odoo shift assignment, AND
+    * the weekday is NOT in WEEKLY_OFF_DAYS, AND
+    * the date is NOT in PUBLIC_HOLIDAYS, AND
+    * the employee has no Check In that day, AND
+    * the employee has no approved time off covering that day.
+- Added Excel `Absence Details` sheet: Employee ID, First Name,
+  Date, Weekday, Is Scheduled Working Day, Has Attendance,
+  Has Approved Time Off, Is Weekly Off, Is Holiday,
+  Counted As Absence, Absence Reason.
+- Added a test that proves Friday-off employees with check-ins on
+  every Sat-Thu get `No of Absence Days = 0` even when colleagues
+  worked the Fridays in the same period (79 tests total).
+
 ## 2026-05-17 (Simplified executive Employee Summary)
 - Excel `Employee Summary` sheet now shows EXACTLY 8 executive
   columns in this order: Employee ID, First Name, No of Absence

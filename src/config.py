@@ -77,3 +77,17 @@ BREAK_IN_STATES = [
         "Break In,Lunch In,In Break,استراحة دخول",
     ).split(",") if s.strip()
 ]
+
+# Absence rule. Weekday names (Python `%A` formatting: Monday, Tuesday,
+# Wednesday, Thursday, Friday, Saturday, Sunday) that count as the
+# weekly off day -- they are NEVER counted as absences. PUBLIC_HOLIDAYS
+# is a comma-separated list of YYYY-MM-DD dates that are likewise
+# excluded from the absence count.
+WEEKLY_OFF_DAYS = [
+    s.strip() for s in os.getenv("WEEKLY_OFF_DAYS", "Friday").split(",")
+    if s.strip()
+]
+PUBLIC_HOLIDAYS = [
+    s.strip() for s in os.getenv("PUBLIC_HOLIDAYS", "").split(",")
+    if s.strip()
+]

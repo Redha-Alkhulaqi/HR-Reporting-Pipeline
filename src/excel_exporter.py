@@ -551,6 +551,14 @@ def export_report(summary, daily):
     if break_summary is not None and not break_summary.empty:
         _build_data_sheet(wb.create_sheet("Break Summary"), break_summary)
 
+    # Absence audit ledger -- every (employee, date) and why it was
+    # or wasn't counted as an absence.
+    absence_details = summary.get("absence_details")
+    if absence_details is not None and not absence_details.empty:
+        _build_data_sheet(
+            wb.create_sheet("Absence Details"), absence_details
+        )
+
     # High-level reconciliation table lives on its own sheet so the
     # Dashboard stays uncluttered.
     reconciliation = summary.get("employee_reconciliation")
