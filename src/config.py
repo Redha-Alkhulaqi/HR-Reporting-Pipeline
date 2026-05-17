@@ -71,6 +71,15 @@ HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT = (
     in ("true", "1", "yes")
 )
 
+# Manual forgotten-punch correction safety toggle. When False (default)
+# manual corrections only FILL missing punches -- they never overwrite an
+# existing biometric one. Flip to True only when you intentionally want
+# camera-verified times to take precedence over the device record.
+ALLOW_OVERRIDE_EXISTING_PUNCH = (
+    os.getenv("ALLOW_OVERRIDE_EXISTING_PUNCH", "false").lower()
+    in ("true", "1", "yes")
+)
+
 # Break-out / break-in Punch State labels. Breaks are INFORMATIONAL
 # only -- they never feed lateness, overtime, early leave, payroll, or
 # risk scoring. Comma-separated to support env-driven overrides.

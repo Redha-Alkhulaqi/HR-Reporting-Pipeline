@@ -33,6 +33,10 @@ from data_loader import (
     load_working_schedule_file,
 )
 from excel_exporter import export_report
+from manual_punch_corrections import (
+    apply_manual_punch_corrections,
+    load_manual_punch_corrections_file,
+)
 from metrics_calculator import calculate_metrics, filter_inputs_for_report
 from report_generator import generate_report
 from validators import (
@@ -116,6 +120,25 @@ def main(argv=None):
 
     try:
         df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
+
+        # Apply temporary manual (camera-verified) forgotten-punch
+        # corrections BEFORE alias remapping so any historical IDs in
+        # the HR form get unified by the alias step alongside biometric
+        # rows. Anything not approved+camera ends up in
+        # rejected_corrections for Exceptions & Manual Review.
+        manual_corrections_df = load_manual_punch_corrections_file(
+            PROJECT_ROOT / "data/manual_forgotten_punches.xlsx"
+        )
+        df, rejected_corrections = apply_manual_punch_corrections(
+            df, manual_corrections_df
+        )
+        applied_n = int(df["is_manual_correction"].sum())
+        if applied_n or not rejected_corrections.empty:
+            logger.info(
+                f"Manual punch corrections: applied={applied_n} "
+                f"rejected={len(rejected_corrections)}"
+            )
+
         schedules_df = load_working_schedule_file(
             PROJECT_ROOT / "data/Resources (resource.resource).xlsx"
         )
