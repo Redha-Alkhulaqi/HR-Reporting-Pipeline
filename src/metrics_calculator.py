@@ -750,6 +750,152 @@ def _attach_break_info(daily, df):
     return daily
 
 
+def _compute_absence_days(daily, time_off_df):
+    """Best-effort absence days per Employee ID.
+
+    Definition: working days the employee did NOT check in and was NOT
+    on any approved leave. Working days are inferred from the dates
+    where ANY employee in the data set checked in (our proxy for
+    "the company was operating"). This intentionally excludes weekly
+    rest days that nobody worked.
+    """
+    if daily.empty:
+        return {}
+
+    working_dates = set(daily["Date"].astype(str).unique())
+    present_dates_by_id = (
+        daily.groupby("Employee ID")["Date"]
+        .apply(lambda s: set(s.astype(str)))
+        .to_dict()
+    )
+
+    # Build a stripped-name -> ID map so we can join time_off (keyed by
+    # employee NAME) back to Employee ID.
+    name_to_id = {}
+    for eid, name in daily.groupby("Employee ID")["First Name"].first().items():
+        if pd.notna(name):
+            name_to_id[str(name).strip()] = eid
+
+    leave_dates_by_id = {}
+    if time_off_df is not None and not time_off_df.empty:
+        approved = time_off_df[time_off_df["Status"] == "Approved"].copy()
+        approved["Employee"] = approved["Employee"].astype(str).str.strip()
+        approved["Start Date"] = pd.to_datetime(
+            approved["Start Date"], errors="coerce"
+        )
+        approved["End Date"] = pd.to_datetime(
+            approved["End Date"], errors="coerce"
+        )
+        approved = approved.dropna(subset=["Start Date", "End Date"])
+        for _, row in approved.iterrows():
+            eid = name_to_id.get(row["Employee"])
+            if eid is None:
+                continue
+            for d in pd.date_range(
+                row["Start Date"].normalize(),
+                row["End Date"].normalize(),
+                freq="D",
+            ):
+                leave_dates_by_id.setdefault(eid, set()).add(
+                    d.strftime("%Y-%m-%d")
+                )
+
+    return {
+        eid: len(working_dates - present - leave_dates_by_id.get(eid, set()))
+        for eid, present in present_dates_by_id.items()
+    }
+
+
+# Executive-summary tuning. These thresholds intentionally DIFFER from
+# the pipeline-wide constants so HR can present a stricter or looser
+# headline figure without changing the underlying daily classification.
+_EXEC_LATE_GRACE_MINUTES = 15
+_EXEC_EARLY_LEAVE_GRACE_MINUTES = 5
+_BREAK_POLICY_FREE_MINUTES = 60
+
+
+def _build_executive_employee_summary(daily, time_off_df):
+    """Build the 8-column executive view of per-employee totals.
+
+    Columns (exact names, in order):
+      Employee ID, First Name, No of Absence Days,
+      Total Late (Hours), Total Over Time (Hours),
+      Total Early Leave (Hours), Break Time (Hours),
+      Break Time (After Policy)
+
+    Late and Early Leave use their OWN executive grace thresholds
+    (15 and 5 minutes) so the executive figure is independent of the
+    pipeline's per-row classification grace. Break Time (After Policy)
+    ignores the first 60 break minutes per day and counts only the
+    excess.
+    """
+    cols = [
+        "Employee ID", "First Name", "No of Absence Days",
+        "Total Late (Hours)", "Total Over Time (Hours)",
+        "Total Early Leave (Hours)", "Break Time (Hours)",
+        "Break Time (After Policy)",
+    ]
+    if daily.empty:
+        return pd.DataFrame(columns=cols)
+
+    absence_by_id = _compute_absence_days(daily, time_off_df)
+
+    work = pd.DataFrame({
+        "Employee ID": daily["Employee ID"],
+        "First Name": daily["First Name"],
+    })
+
+    raw_delay = daily["Delay Minutes"].clip(lower=0).astype(int)
+    work["_late_min"] = raw_delay.where(raw_delay > _EXEC_LATE_GRACE_MINUTES, 0)
+
+    # Raw early-leave gap = matched Shift End - Check Out (clamped >= 0).
+    # We use the datetime columns so split-shift matching is honored.
+    def _raw_early(row):
+        if not row["has_check_out"]:
+            return 0
+        se = row.get("Shift End DateTime")
+        co = row.get("Check Out DateTime")
+        if pd.isna(se) or pd.isna(co):
+            return 0
+        gap = int((se - co).total_seconds() / 60)
+        return max(0, gap)
+
+    raw_early = daily.apply(_raw_early, axis=1)
+    work["_early_leave_min"] = raw_early.where(
+        raw_early > _EXEC_EARLY_LEAVE_GRACE_MINUTES, 0
+    )
+
+    work["_overtime_min"] = daily["overtime_minutes"].astype(int)
+    work["_break_min"] = daily["total_break_minutes"].astype(int)
+    work["_break_after_policy_min"] = (
+        work["_break_min"] - _BREAK_POLICY_FREE_MINUTES
+    ).clip(lower=0)
+
+    grp = (
+        work.groupby(["Employee ID", "First Name"], as_index=False)
+        .agg(
+            late_min=("_late_min", "sum"),
+            overtime_min=("_overtime_min", "sum"),
+            early_leave_min=("_early_leave_min", "sum"),
+            break_min=("_break_min", "sum"),
+            break_after_policy_min=("_break_after_policy_min", "sum"),
+        )
+    )
+
+    grp["No of Absence Days"] = grp["Employee ID"].map(absence_by_id).fillna(0).astype(int)
+    grp["Total Late (Hours)"] = (grp["late_min"] / 60).round(1)
+    grp["Total Over Time (Hours)"] = (grp["overtime_min"] / 60).round(1)
+    grp["Total Early Leave (Hours)"] = (grp["early_leave_min"] / 60).round(1)
+    grp["Break Time (Hours)"] = (grp["break_min"] / 60).round(1)
+    grp["Break Time (After Policy)"] = (grp["break_after_policy_min"] / 60).round(1)
+
+    return (
+        grp[cols]
+        .sort_values("Total Late (Hours)", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def _build_break_summary(daily):
     """Per-employee break aggregates for the Break Summary sheet."""
     cols = [
@@ -1404,6 +1550,11 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
     )
 
+    # Executive view of the Employee Summary sheet (8 named columns,
+    # hours-based, independent grace thresholds). Lives alongside the
+    # internal employee_summary so the Markdown / charts keep working.
+    executive_employee_summary = _build_executive_employee_summary(daily, time_off_df)
+
     # Break aggregates -- purely informational, no exclusion gating.
     break_summary = _build_break_summary(daily)
     total_break_count = int(daily["break_count"].sum())
@@ -1514,6 +1665,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "top_overtime_employees": top_overtime_employees,
         "top_early_leave_employees": top_early_leave_employees,
         "break_summary": break_summary,
+        "executive_employee_summary": executive_employee_summary,
         "excluded_employees_summary": excluded_employees_summary,
         "excluded_employee_count": int(
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()

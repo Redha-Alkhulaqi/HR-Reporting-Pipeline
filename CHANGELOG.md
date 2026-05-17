@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-05-17 (Simplified executive Employee Summary)
+- Excel `Employee Summary` sheet now shows EXACTLY 8 executive
+  columns in this order: Employee ID, First Name, No of Absence
+  Days, Total Late (Hours), Total Over Time (Hours), Total Early
+  Leave (Hours), Break Time (Hours), Break Time (After Policy).
+- Executive grace thresholds (15 min late, 5 min early leave) are
+  independent of the pipeline-wide grace settings -- they only
+  affect the headline numbers on this sheet. The pipeline's per-row
+  classification (and every other sheet) stays unchanged.
+- "No of Absence Days" is computed as
+  working_dates - employee_check_in_dates - employee_approved_leave_dates
+  where working_dates = any date with at least one check-in.
+  Approved leaves of any type (Annual / Sick / استأذان / ...) are
+  treated as not-absent.
+- "Break Time (After Policy)" applies a 60-minute daily allowance:
+  per day, `max(0, total_break_minutes - 60)`, then aggregated.
+- All hour columns are rounded to 1 decimal, centered, with bold
+  blue header, freeze pane on row 2, and auto-filter.
+- Added `executive_employee_summary` to the summary dict and a
+  dedicated `_build_executive_employee_sheet` writer with numeric
+  formatting (`#,##0` for integer cols, `0.0` for hours).
+- Top Late Employees chart on the Dashboard now reads col 4 of the
+  simplified sheet (Total Late (Hours)) -- still surfaces the same
+  ranking, just in hours rather than minutes.
+- Internal `employee_summary` is unchanged (risk_score, payroll,
+  flags, etc.) -- still drives the Claude markdown Top Late
+  Employees section and other detail sheets.
+- Added `tests/test_executive_summary.py` (9 tests): column
+  presence, late grace (under / above 15 min), early-leave grace
+  (under / above 5 min), break-after-policy threshold, absence days
+  counting, and approved-leave exclusion from absence (78 total).
+
 ## 2026-05-16 (Informational break analytics)
 - Added break detection from attendance punch states. The pairing
   engine walks each (employee, day) in time order: every Break Out is

@@ -102,6 +102,50 @@ def _build_data_sheet(ws, df):
     _autosize_columns(ws)
 
 
+def _build_executive_employee_sheet(ws, df):
+    """Render the simplified executive Employee Summary sheet.
+
+    8 columns expected (in this exact order):
+        Employee ID, First Name, No of Absence Days,
+        Total Late (Hours), Total Over Time (Hours),
+        Total Early Leave (Hours), Break Time (Hours),
+        Break Time (After Policy).
+
+    Apply executive-friendly formatting: bold header, frozen header,
+    auto-filter, centered numeric cells, thousands separator on integer
+    columns, and 1-decimal display on hour columns.
+    """
+    if df is None or df.empty:
+        ws.append(["(no data)"])
+        return
+    for row in dataframe_to_rows(df, index=False, header=True):
+        ws.append(_sanitize_row(row))
+    _style_header_row(ws, row=1, n_cols=ws.max_column)
+    ws.freeze_panes = "A2"
+    if ws.max_row > 1:
+        ws.auto_filter.ref = ws.dimensions
+    _autosize_columns(ws)
+
+    if ws.max_row <= 1:
+        return
+
+    # Integer columns: Employee ID (1), No of Absence Days (3).
+    _format_numeric_cells(
+        ws,
+        rows=range(2, ws.max_row + 1),
+        cols=[1, 3],
+        number_format="#,##0",
+    )
+    # Hour columns: 4 (Late), 5 (Overtime), 6 (Early Leave),
+    # 7 (Break), 8 (Break after policy).
+    _format_numeric_cells(
+        ws,
+        rows=range(2, ws.max_row + 1),
+        cols=[4, 5, 6, 7, 8],
+        number_format="0.0",
+    )
+
+
 def _apply_daily_conditional_formatting(ws, df):
     """Color-code each row in Daily Attendance by its dominant status.
 
@@ -378,14 +422,16 @@ def _build_dashboard(wb, summary):
                 "K3",
             )
 
-    # Chart 3 (bottom-left): Top Late Employees (references Employee Summary).
+    # Chart 3 (bottom-left): Top Late Employees -- references the
+    # simplified Employee Summary sheet which is sorted by
+    # Total Late (Hours) desc.
     emp_ws = wb["Employee Summary"]
     if emp_ws.max_row > 1:
         n_late = min(10, emp_ws.max_row - 1)
-        # Employee Summary cols: 1=Employee ID, 2=First Name,
-        # 3=total_late_minutes, ...
+        # Executive sheet cols: 1=Employee ID, 2=First Name,
+        # 3=No of Absence Days, 4=Total Late (Hours), ...
         late_labels = Reference(emp_ws, min_col=2, min_row=2, max_row=1 + n_late)
-        late_values = Reference(emp_ws, min_col=3, min_row=2, max_row=1 + n_late)
+        late_values = Reference(emp_ws, min_col=4, min_row=2, max_row=1 + n_late)
         ws.add_chart(
             _bar_chart("Top Late Employees", late_labels, late_values,
                        horizontal=True),
@@ -433,7 +479,10 @@ def export_report(summary, daily):
     wb.active.title = "Dashboard"
 
     # Always-present data sheets, in this tab order.
-    _build_data_sheet(wb.create_sheet("Employee Summary"), summary["employee_summary"])
+    _build_executive_employee_sheet(
+        wb.create_sheet("Employee Summary"),
+        summary.get("executive_employee_summary"),
+    )
     daily_ws = wb.create_sheet("Daily Attendance")
     _build_data_sheet(daily_ws, daily)
     _apply_daily_conditional_formatting(daily_ws, daily)
