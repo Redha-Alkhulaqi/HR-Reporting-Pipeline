@@ -1303,17 +1303,17 @@ def _build_top_early_leave_employees(daily):
     Early leave is a discipline-adjacent metric, so we honor the same
     `excluded_from_late` flag used by the lateness KPIs.
     """
+    cols = [
+        "Employee ID", "First Name",
+        "early_leave_cases",
+        "total_early_leave_minutes", "total_early_leave_hours",
+    ]
     el_rows = daily[
         (daily["early_leave_status"] == "Early Leave")
         & (~daily.get("excluded_from_late", False))
     ]
     if el_rows.empty:
-        return pd.DataFrame(
-            columns=[
-                "Employee ID", "First Name",
-                "early_leave_cases", "total_early_leave_minutes",
-            ]
-        )
+        return pd.DataFrame(columns=cols)
     top = (
         el_rows.groupby(["Employee ID", "First Name"])
         .agg(
@@ -1324,7 +1324,8 @@ def _build_top_early_leave_employees(daily):
         .sort_values("total_early_leave_minutes", ascending=False)
     )
     top["total_early_leave_minutes"] = top["total_early_leave_minutes"].astype(int)
-    return top.reset_index(drop=True)
+    top["total_early_leave_hours"] = (top["total_early_leave_minutes"] / 60).round(1)
+    return top[cols].reset_index(drop=True)
 
 
 def _build_top_overtime_employees(daily):

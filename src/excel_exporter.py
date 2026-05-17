@@ -371,16 +371,17 @@ def _build_dashboard(wb, summary):
             number_format="0.0",
         )
 
-    # Top Early Leave table (simplified). Drives Chart 5.
+    # Top Early Leave table -- mirrors the Top Overtime layout: 4 cols
+    # ending with the hours conversion for an executive-friendly read.
     top_el_full = summary.get("top_early_leave_employees")
+    el_cols = [
+        "Employee ID", "First Name",
+        "total_early_leave_minutes", "total_early_leave_hours",
+    ]
     if top_el_full is not None and not top_el_full.empty:
-        simplified_el = top_el_full[[
-            "Employee ID", "First Name", "total_early_leave_minutes",
-        ]].head(10).copy()
+        simplified_el = top_el_full[el_cols].head(10).copy()
     else:
-        simplified_el = pd.DataFrame(columns=[
-            "Employee ID", "First Name", "total_early_leave_minutes",
-        ])
+        simplified_el = pd.DataFrame(columns=el_cols)
     ws.cell(row=ot_next, column=1,
             value="Top Early Leave Employees").font = _SECTION_FONT
     _, el_data_start, el_data_end, _, _ = _write_dataframe(
@@ -392,6 +393,12 @@ def _build_dashboard(wb, summary):
             rows=range(el_data_start, el_data_end + 1),
             cols=[1, 3],
             number_format="#,##0",
+        )
+        _format_numeric_cells(
+            ws,
+            rows=range(el_data_start, el_data_end + 1),
+            cols=[4],
+            number_format="0.0",
         )
 
     # ---------------- Charts: 2x2 grid (anchors leave visual buffer) ----------------
