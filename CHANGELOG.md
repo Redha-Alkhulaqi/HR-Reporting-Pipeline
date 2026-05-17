@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-05-17 (Employee ID alias mapping for historical BioTime IDs)
+- New optional input `data/employee_id_aliases.xlsx` with columns:
+  Old Employee ID, Current Employee ID, Employee Name, Source,
+  Active, Notes. Missing file is a graceful no-op.
+- Added `load_employee_id_aliases_file` and the
+  `apply_employee_id_aliases(df, aliases_df, schedules_df)` engine
+  in data_loader. The engine runs IMMEDIATELY after loading
+  attendance, before validation and any metric computation, so the
+  remapped Employee ID flows through every downstream step (daily
+  aggregation, reconciliation, missing schedule, absence,
+  late/overtime/early leave/break).
+- Per-row audit columns added to the attendance df:
+  `original_employee_id`, `mapped_employee_id`,
+  `id_alias_applied` (bool), `alias_source`.
+- First Name is filled from the alias's Employee Name ONLY when the
+  existing First Name is missing / blank -- the alias never overwrites
+  a non-empty existing name.
+- Validation:
+    * Old Employee ID mapping to multiple Current IDs -> warning,
+      first-seen wins.
+    * Current Employee ID with no matching Odoo schedule entry ->
+      warning, mapping still applied.
+    * Active=FALSE rows -> skipped entirely.
+- Added summary KPIs `employee_id_aliases_used` and
+  `employee_id_alias_records_mapped`, plus an `alias_audit` DataFrame.
+- Excel: two new informational KPIs on the Dashboard plus an
+  `Employee ID Alias Audit` sheet (Old ID / Current ID / Employee
+  Name / Source / Records Mapped / Notes).
+- Claude markdown: new `## Employee ID Alias Mapping` section that
+  explains the migration context (old fingerprint devices -> new
+  ones) and lists every active alias actually used.
+- Mapped records are no longer flagged as orphans when the Current
+  Employee ID resolves to a name in the Odoo resources export.
+- Added `tests/test_id_aliases.py` (6 tests): ID remap, First Name
+  filled only when blank, inactive alias ignored, duplicate alias
+  warning, current-ID-missing-from-schedules warning, and an
+  end-to-end "mapped record is not an orphan" check (89 total).
+
 ## 2026-05-17 (Hide excluded employees from report outputs)
 - New config `HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT` (default True).
   When on, excluded employees no longer appear in ANY exported sheet

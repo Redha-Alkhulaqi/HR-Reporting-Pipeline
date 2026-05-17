@@ -1657,7 +1657,8 @@ def filter_inputs_for_report(df, schedules_df, time_off_df, excluded_df):
     return filtered_df, filtered_schedules, filtered_time_off, hidden_count
 
 
-def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
+def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
+                      alias_audit=None):
     # Build the source-of-truth intervals lookup ONCE; derive the
     # single-time lookups from it so all three views stay consistent
     # even when shifts are split.
@@ -1835,6 +1836,17 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "executive_employee_summary": executive_employee_summary,
         "absence_details": absence_details,
         "excluded_employees_summary": excluded_employees_summary,
+        "alias_audit": (
+            alias_audit if alias_audit is not None else pd.DataFrame()
+        ),
+        "employee_id_aliases_used": (
+            int(len(alias_audit)) if alias_audit is not None
+            and not alias_audit.empty else 0
+        ),
+        "employee_id_alias_records_mapped": (
+            int(alias_audit["records_mapped"].sum())
+            if alias_audit is not None and not alias_audit.empty else 0
+        ),
         "excluded_employee_count": int(
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()
         ),

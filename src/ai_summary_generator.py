@@ -15,20 +15,23 @@ Sections (in order):
    9. HR Audit Flags              (employees flagged for chronic late,
                                    missing checkouts, excessive excuses,
                                    no schedule, anomalies)
-  10. Break Analysis              (INFORMATIONAL only -- does NOT affect
+  10. Employee ID Alias Mapping    (old BioTime IDs remapped to current
+                                    Odoo IDs; only shown when at least
+                                    one active alias exists)
+  11. Break Analysis              (INFORMATIONAL only -- does NOT affect
                                    any KPI above or below)
-  11. Excluded Employees          (policy exclusions from KPIs while
+  12. Excluded Employees          (policy exclusions from KPIs while
                                    operational data stays visible)
-  12. Early Leave Analysis        (counts, minutes, top early-leave employees)
-  13. Early Leave Anomalies       (rows above the implausibility threshold)
-  14. Overtime Analysis           (counts, hours, top overtime employees)
-  15. Department Summary          (only when department data is present)
-  16. Approved Excuse Records
-  17. Missing Punch Analysis
-  18. Employees Missing Working Schedule
-  19. Late Attendance Records
-  20. Business Logic Notes
-  21. Instructions for Claude
+  13. Early Leave Analysis        (counts, minutes, top early-leave employees)
+  14. Early Leave Anomalies       (rows above the implausibility threshold)
+  15. Overtime Analysis           (counts, hours, top overtime employees)
+  16. Department Summary          (only when department data is present)
+  17. Approved Excuse Records
+  18. Missing Punch Analysis
+  19. Employees Missing Working Schedule
+  20. Late Attendance Records
+  21. Business Logic Notes
+  22. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -319,6 +322,26 @@ def generate_ai_input_file(metrics, attendance_daily):
         )
 
         _write_hr_audit_flags(f, metrics)
+
+        alias_audit = metrics.get("alias_audit")
+        if alias_audit is not None and not alias_audit.empty:
+            f.write("\n\n## Employee ID Alias Mapping\n")
+            f.write(
+                "Some employees previously held more than one BioTime "
+                "Employee ID because old fingerprint devices used old "
+                "IDs and newer devices use new ones. Old IDs were "
+                "decommissioned in Odoo, but historical punches still "
+                "carry them. The pipeline remaps these to the current "
+                "Employee ID immediately after loading attendance, so "
+                "the rest of the report (lateness, overtime, "
+                "reconciliation, absence, etc.) sees a unified ID.\n\n"
+            )
+            f.write(
+                f"- Active aliases configured: **{len(alias_audit)}**\n"
+                f"- Attendance rows remapped: "
+                f"**{int(alias_audit['records_mapped'].sum())}**\n\n"
+            )
+            f.write(alias_audit.to_markdown(index=False))
 
         f.write("\n\n## Break Analysis\n")
         break_count = metrics.get("total_break_count", 0)

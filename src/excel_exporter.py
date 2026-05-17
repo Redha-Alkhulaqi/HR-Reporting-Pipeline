@@ -300,6 +300,11 @@ def _build_dashboard(wb, summary):
          summary.get("employees_with_breaks", 0), "#,##0"),
         ("Incomplete Break Records (info)",
          summary.get("incomplete_break_records", 0), "#,##0"),
+        # Employee ID alias mapping -- INFORMATIONAL.
+        ("Aliases Used (info)",
+         summary.get("employee_id_aliases_used", 0), "#,##0"),
+        ("Alias Records Mapped (info)",
+         summary.get("employee_id_alias_records_mapped", 0), "#,##0"),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -557,6 +562,14 @@ def export_report(summary, daily):
     if absence_details is not None and not absence_details.empty:
         _build_data_sheet(
             wb.create_sheet("Absence Details"), absence_details
+        )
+
+    # Employee ID alias audit -- which historical IDs got remapped to
+    # current IDs (only when at least one alias was configured active).
+    alias_audit = summary.get("alias_audit")
+    if alias_audit is not None and not alias_audit.empty:
+        _build_data_sheet(
+            wb.create_sheet("Employee ID Alias Audit"), alias_audit
         )
 
     # High-level reconciliation table lives on its own sheet so the

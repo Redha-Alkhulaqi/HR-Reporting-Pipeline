@@ -25,7 +25,9 @@ import pandas as pd
 from ai_summary_generator import generate_ai_input_file
 from config import HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT, LOG_LEVEL, PROJECT_ROOT
 from data_loader import (
+    apply_employee_id_aliases,
     load_attendance_file,
+    load_employee_id_aliases_file,
     load_excluded_employees_file,
     load_time_off_file,
     load_working_schedule_file,
@@ -124,11 +126,29 @@ def main(argv=None):
         excluded_df = load_excluded_employees_file(
             PROJECT_ROOT / "data/excluded_employees.xlsx"
         )
+        aliases_df = load_employee_id_aliases_file(
+            PROJECT_ROOT / "data/employee_id_aliases.xlsx"
+        )
         logger.info(
             f"Input files loaded: attendance={len(df)} schedules={len(schedules_df)} "
             f"time_off={len(time_off_df) if time_off_df is not None else 0} "
-            f"exclusions={len(excluded_df)}"
+            f"exclusions={len(excluded_df)} aliases={len(aliases_df)}"
         )
+
+        # Apply alias mapping IMMEDIATELY after loading so every
+        # downstream step (validation, daily aggregation, reconciliation,
+        # absence detection, late/overtime/early leave/break) sees the
+        # unified Employee ID.
+        df, alias_audit, alias_warnings = apply_employee_id_aliases(
+            df, aliases_df, schedules_df
+        )
+        for w in alias_warnings:
+            logger.warning(f"Alias mapping: {w}")
+        if not alias_audit.empty:
+            logger.info(
+                f"Alias mapping: {len(alias_audit)} active alias(es), "
+                f"{int(alias_audit['records_mapped'].sum())} attendance rows remapped"
+            )
 
         if args.from_date or args.to_date:
             before = len(df)
@@ -143,7 +163,8 @@ def main(argv=None):
         _log_validation(validate_time_off(time_off_df))
 
         summary, daily = calculate_metrics(
-            df, schedules_df, time_off_df, excluded_df=excluded_df
+            df, schedules_df, time_off_df,
+            excluded_df=excluded_df, alias_audit=alias_audit,
         )
         logger.info(
             f"Metrics computed: daily_rows={len(daily)} "
@@ -167,7 +188,8 @@ def main(argv=None):
             )
             if hidden > 0:
                 report_summary, report_daily = calculate_metrics(
-                    r_df, r_sched, r_tof, excluded_df=None
+                    r_df, r_sched, r_tof,
+                    excluded_df=None, alias_audit=alias_audit,
                 )
             logger.info(f"Excluded employees hidden from report: {hidden}")
 
