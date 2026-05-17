@@ -579,6 +579,14 @@ def export_report(summary, daily):
             wb.create_sheet("Employee ID Alias Audit"), alias_audit
         )
 
+    # Manual punch corrections that did NOT clear the approval / evidence
+    # gates -- exposed for Exceptions & Manual Review follow-up.
+    rejected_corrections = summary.get("rejected_punch_corrections")
+    if rejected_corrections is not None and not rejected_corrections.empty:
+        _build_data_sheet(
+            wb.create_sheet("Manual Punch Rejections"), rejected_corrections
+        )
+
     # High-level reconciliation table lives on its own sheet so the
     # Dashboard stays uncluttered.
     reconciliation = summary.get("employee_reconciliation")

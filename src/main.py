@@ -138,6 +138,19 @@ def main(argv=None):
                 f"Manual punch corrections: applied={applied_n} "
                 f"rejected={len(rejected_corrections)}"
             )
+        for _, rej in rejected_corrections.iterrows():
+            raw_date = rej.get("date")
+            try:
+                date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                date_str = "" if pd.isna(raw_date) else str(raw_date)
+            logger.warning(
+                "Rejected correction: "
+                f"employee={rej.get('employee_code')} "
+                f"date={date_str} "
+                f"type={rej.get('punch_type')} "
+                f"reason={rej.get('rejection_reason')}"
+            )
 
         schedules_df = load_working_schedule_file(
             PROJECT_ROOT / "data/Resources (resource.resource).xlsx"
@@ -215,6 +228,9 @@ def main(argv=None):
                     excluded_df=None, alias_audit=alias_audit,
                 )
             logger.info(f"Excluded employees hidden from report: {hidden}")
+
+        # Surface manual-correction rejections in the exported workbook.
+        report_summary["rejected_punch_corrections"] = rejected_corrections
 
         generate_report(report_summary)
         logger.info("HR report generated")

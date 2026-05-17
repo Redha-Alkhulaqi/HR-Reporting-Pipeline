@@ -95,7 +95,7 @@ def test_existing_punch_not_overwritten_by_default():
     assert (out["Punch Time"] == "08:30:00").sum() == 1
     assert not out["is_manual_correction"].any()
     assert len(rejected) == 1
-    assert rejected.iloc[0]["rejection_reason"] == "punch_already_exists"
+    assert rejected.iloc[0]["rejection_reason"] == "existing_check_in_already_present"
 
 
 def test_existing_punch_overwritten_when_allow_override():

@@ -188,7 +188,9 @@ def apply_manual_punch_corrections(attendance_df, corrections_df,
 
         if existing.any():
             if not allow_override:
-                rejected_rows.append((row, "punch_already_exists"))
+                rejected_rows.append(
+                    (row, f"existing_{ptype}_already_present")
+                )
                 continue
             overrides.append({
                 "mask": existing, "time": time_str,
