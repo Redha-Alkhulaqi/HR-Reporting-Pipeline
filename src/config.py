@@ -62,6 +62,15 @@ ALLOW_NAME_BASED_EXCLUSION_MATCH = (
     in ("true", "1", "yes")
 )
 
+# When True, excluded employees are removed from every report-facing
+# DataFrame before it leaves the pipeline -- the Excel workbook and
+# the Claude markdown both behave as if those employees do not exist.
+# The exclusion file and the validation log still note them for audit.
+HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT = (
+    os.getenv("HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT", "true").lower()
+    in ("true", "1", "yes")
+)
+
 # Break-out / break-in Punch State labels. Breaks are INFORMATIONAL
 # only -- they never feed lateness, overtime, early leave, payroll, or
 # risk scoring. Comma-separated to support env-driven overrides.

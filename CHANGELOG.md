@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-05-17 (Hide excluded employees from report outputs)
+- New config `HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT` (default True).
+  When on, excluded employees no longer appear in ANY exported sheet
+  or in the Claude markdown -- the report behaves as if they do not
+  exist. The exclusion file and the validation log keep them for audit.
+- Added `filter_inputs_for_report(df, schedules_df, time_off_df,
+  excluded_df)` in metrics_calculator. It honors the existing
+  exclusion-matching rules (Employee ID first; name-only rules fall
+  back to normalized name match) and returns
+  `(filtered_df, filtered_schedules, filtered_time_off, hidden_count)`.
+- main.py runs `calculate_metrics` twice: once on the full inputs
+  (keeps the audit summary internal), then on the filtered inputs
+  (drives every exporter). Single log line:
+  "Excluded employees hidden from report: N".
+- excel_exporter: the conditional "Excluded Employees" sheet is no
+  longer generated because the filtered summary has no
+  excluded_employees_summary rows.
+- ai_summary_generator: the "## Excluded Employees" section is now
+  rendered only when there are visible exclusions. With the new flag
+  on, the section is skipped entirely.
+- Added `tests/test_hide_excluded.py` (4 tests): ID-based filtering,
+  name-only filtering, end-to-end "no excluded ID in any report
+  DataFrame", and the no-op path when the exclusion file is absent
+  (83 total).
+
+Real-data check (current exclusion file: 4 IDs, 3 of which are in
+the attendance file):
+  log: "Excluded employees hidden from report: 3"
+  Every Excel sheet with an Employee ID column: 0 leaked IDs.
+  Excluded Employees sheet: not created.
+
 ## 2026-05-17 (Fix absence count to exclude weekly off days)
 - Fixed `No of Absence Days` wrongly counting weekly off days. Real
   example before the fix: REDHA ALI AHMED ALKHULAQI-EMP389 showed 3

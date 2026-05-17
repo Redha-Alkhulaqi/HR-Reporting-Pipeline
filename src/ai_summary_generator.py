@@ -347,20 +347,22 @@ def generate_ai_input_file(metrics, attendance_daily):
             "follow up on terminal sync issues.\n"
         )
 
+        # The Excluded Employees section is rendered only when the
+        # filtered report still surfaces some exclusion data. When
+        # HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT is on the metrics dict
+        # arrives empty and the whole section is skipped.
         excluded_summary = metrics.get("excluded_employees_summary")
-        f.write("\n\n## Excluded Employees\n")
-        f.write(
-            "Excluded employees remain visible in the raw operational "
-            "data (Daily Attendance, Daily Trend) so HR can still see "
-            "what they did, but their rows are dropped from the "
-            "management KPIs (late_cases, overtime_cases, payroll "
-            "deduction, risk scoring) according to the per-employee "
-            "exclusion flags. Exclusions are policy decisions sourced "
-            "from `data/excluded_employees.xlsx`.\n\n"
-        )
-        if excluded_summary is None or excluded_summary.empty:
-            f.write("_No exclusions configured for this period._\n")
-        else:
+        if excluded_summary is not None and not excluded_summary.empty:
+            f.write("\n\n## Excluded Employees\n")
+            f.write(
+                "Excluded employees remain visible in the raw operational "
+                "data (Daily Attendance, Daily Trend) so HR can still see "
+                "what they did, but their rows are dropped from the "
+                "management KPIs (late_cases, overtime_cases, payroll "
+                "deduction, risk scoring) according to the per-employee "
+                "exclusion flags. Exclusions are policy decisions sourced "
+                "from `data/excluded_employees.xlsx`.\n\n"
+            )
             f.write(excluded_summary.to_markdown(index=False))
 
         f.write("\n\n## Early Leave Analysis\n")

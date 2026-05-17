@@ -23,7 +23,7 @@ import logging
 import pandas as pd
 
 from ai_summary_generator import generate_ai_input_file
-from config import LOG_LEVEL, PROJECT_ROOT
+from config import HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT, LOG_LEVEL, PROJECT_ROOT
 from data_loader import (
     load_attendance_file,
     load_excluded_employees_file,
@@ -31,7 +31,7 @@ from data_loader import (
     load_working_schedule_file,
 )
 from excel_exporter import export_report
-from metrics_calculator import calculate_metrics
+from metrics_calculator import calculate_metrics, filter_inputs_for_report
 from report_generator import generate_report
 from validators import (
     ValidationError,
@@ -157,13 +157,27 @@ def main(argv=None):
             f"data_quality_score={summary.get('data_quality_score', 'n/a')}"
         )
 
-        generate_report(summary)
+        # Build the REPORT view -- by default we hide excluded employees
+        # from every exported sheet and from the Claude markdown. The
+        # internal `summary`/`daily` above keep them for audit.
+        report_summary, report_daily = summary, daily
+        if HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT and excluded_df is not None and not excluded_df.empty:
+            r_df, r_sched, r_tof, hidden = filter_inputs_for_report(
+                df, schedules_df, time_off_df, excluded_df
+            )
+            if hidden > 0:
+                report_summary, report_daily = calculate_metrics(
+                    r_df, r_sched, r_tof, excluded_df=None
+                )
+            logger.info(f"Excluded employees hidden from report: {hidden}")
+
+        generate_report(report_summary)
         logger.info("HR report generated")
 
-        export_report(summary, daily)
+        export_report(report_summary, report_daily)
         logger.info("Excel report exported")
 
-        generate_ai_input_file(summary, daily)
+        generate_ai_input_file(report_summary, report_daily)
         logger.info("AI input file generated")
 
     except ValidationError as exc:

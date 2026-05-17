@@ -1574,6 +1574,89 @@ def _build_employee_reconciliation_details(df, schedules_df, daily):
     return all_emp.sort_values("Employee ID").reset_index(drop=True)
 
 
+def filter_inputs_for_report(df, schedules_df, time_off_df, excluded_df):
+    """Drop excluded employees from the raw inputs so the report sees
+    none of them. Returns
+        (filtered_df, filtered_schedules, filtered_time_off, hidden_count).
+
+    The same matching rules used by `_attach_exclusion_info` apply:
+    Employee ID matches by ID; rules with no ID match by normalized
+    Employee Name. Schedules and time-off rows for the excluded names
+    are also filtered so downstream Reconciliation / lookups do not
+    show the hidden employees.
+
+    `hidden_count` is the number of distinct Employee IDs actually
+    removed from `df` -- exclusion rules pointing at people who never
+    appear in the attendance file contribute zero.
+    """
+    if excluded_df is None or excluded_df.empty:
+        return df, schedules_df, time_off_df, 0
+
+    rules = _build_exclusion_rules(excluded_df)
+    excluded_ids = set()
+    excluded_names = set()
+    for rule in rules:
+        if rule["id"] is not None:
+            excluded_ids.add(rule["id"])
+        elif rule["normalized_name"]:
+            excluded_names.add(rule["normalized_name"])
+
+    if not excluded_ids and not excluded_names:
+        return df, schedules_df, time_off_df, 0
+
+    # Filter attendance df by ID and/or normalized name.
+    df_mask = pd.Series(False, index=df.index)
+    if excluded_ids:
+        df_mask = df_mask | df["Employee ID"].isin(excluded_ids)
+    if excluded_names:
+        df_norm = df["First Name"].astype(str).apply(_normalize_name)
+        df_mask = df_mask | df_norm.isin(excluded_names)
+    filtered_df = df[~df_mask].copy()
+
+    # Filter schedules by name (no IDs in the schedules file).
+    sched_mask = pd.Series(False, index=schedules_df.index)
+    if excluded_names:
+        sched_norm = schedules_df["Name"].astype(str).apply(_normalize_name)
+        sched_mask = sched_mask | sched_norm.isin(excluded_names)
+    # Names that came with IDs may also appear in schedules; resolve
+    # by walking the attendance df to find the names that go with the
+    # excluded IDs, then drop those from schedules too.
+    if excluded_ids:
+        id_to_names = (
+            df.loc[df["Employee ID"].isin(excluded_ids), "First Name"]
+            .dropna()
+            .astype(str)
+            .apply(_normalize_name)
+            .unique()
+        )
+        if len(id_to_names):
+            sched_norm = schedules_df["Name"].astype(str).apply(_normalize_name)
+            sched_mask = sched_mask | sched_norm.isin(set(id_to_names))
+    filtered_schedules = schedules_df[~sched_mask].copy()
+
+    # Filter time off by Employee name.
+    if time_off_df is not None and not time_off_df.empty:
+        tof_mask = pd.Series(False, index=time_off_df.index)
+        all_names_to_drop = set(excluded_names)
+        if excluded_ids:
+            all_names_to_drop |= set(
+                df.loc[df["Employee ID"].isin(excluded_ids), "First Name"]
+                .dropna()
+                .astype(str)
+                .apply(_normalize_name)
+                .unique()
+            )
+        if all_names_to_drop:
+            tof_norm = time_off_df["Employee"].astype(str).apply(_normalize_name)
+            tof_mask = tof_mask | tof_norm.isin(all_names_to_drop)
+        filtered_time_off = time_off_df[~tof_mask].copy()
+    else:
+        filtered_time_off = time_off_df
+
+    hidden_count = int(df.loc[df_mask, "Employee ID"].nunique())
+    return filtered_df, filtered_schedules, filtered_time_off, hidden_count
+
+
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     # Build the source-of-truth intervals lookup ONCE; derive the
     # single-time lookups from it so all three views stay consistent
