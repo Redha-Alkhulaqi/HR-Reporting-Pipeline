@@ -15,18 +15,20 @@ Sections (in order):
    9. HR Audit Flags              (employees flagged for chronic late,
                                    missing checkouts, excessive excuses,
                                    no schedule, anomalies)
-  10. Excluded Employees          (policy exclusions from KPIs while
+  10. Break Analysis              (INFORMATIONAL only -- does NOT affect
+                                   any KPI above or below)
+  11. Excluded Employees          (policy exclusions from KPIs while
                                    operational data stays visible)
-  11. Early Leave Analysis        (counts, minutes, top early-leave employees)
-  12. Early Leave Anomalies       (rows above the implausibility threshold)
-  13. Overtime Analysis           (counts, hours, top overtime employees)
-  14. Department Summary          (only when department data is present)
-  15. Approved Excuse Records
-  16. Missing Punch Analysis
-  17. Employees Missing Working Schedule
-  18. Late Attendance Records
-  19. Business Logic Notes
-  20. Instructions for Claude
+  12. Early Leave Analysis        (counts, minutes, top early-leave employees)
+  13. Early Leave Anomalies       (rows above the implausibility threshold)
+  14. Overtime Analysis           (counts, hours, top overtime employees)
+  15. Department Summary          (only when department data is present)
+  16. Approved Excuse Records
+  17. Missing Punch Analysis
+  18. Employees Missing Working Schedule
+  19. Late Attendance Records
+  20. Business Logic Notes
+  21. Instructions for Claude
 
 Files are written to REPORT_OUTPUT_DIR/YYYY-MM/claude_hr_report_input.md
 so each month is naturally archived.
@@ -317,6 +319,33 @@ def generate_ai_input_file(metrics, attendance_daily):
         )
 
         _write_hr_audit_flags(f, metrics)
+
+        f.write("\n\n## Break Analysis\n")
+        break_count = metrics.get("total_break_count", 0)
+        break_min = metrics.get("total_break_minutes", 0)
+        emp_breaks = metrics.get("employees_with_breaks", 0)
+        incomplete_brk = metrics.get("incomplete_break_records", 0)
+        f.write(
+            f"- Total break count: **{break_count}**\n"
+            f"- Total break minutes: **{break_min}** "
+            f"({break_min // 60}h {break_min % 60}m)\n"
+            f"- Employees with breaks: **{emp_breaks}**\n"
+            f"- Incomplete break records: **{incomplete_brk}**\n\n"
+        )
+        break_summary = metrics.get("break_summary")
+        if break_summary is not None and not break_summary.empty:
+            f.write("### Per-employee Break Summary (top 20 by minutes)\n")
+            f.write(break_summary.head(20).to_markdown(index=False))
+        else:
+            f.write("_No break punches recorded this period._\n")
+        f.write(
+            "\n\n_Notes:_ Break analytics is **informational only**. "
+            "Breaks do NOT affect lateness, overtime, early leave, "
+            "payroll deduction, risk scoring, attendance_status, or "
+            "the data quality score. Incomplete records (a Break Out "
+            "without a Break In, or vice versa) are surfaced so HR can "
+            "follow up on terminal sync issues.\n"
+        )
 
         excluded_summary = metrics.get("excluded_employees_summary")
         f.write("\n\n## Excluded Employees\n")

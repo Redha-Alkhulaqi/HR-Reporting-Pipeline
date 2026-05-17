@@ -95,6 +95,8 @@ import pandas as pd
 
 from config import (
     ALLOW_NAME_BASED_EXCLUSION_MATCH,
+    BREAK_IN_STATES,
+    BREAK_OUT_STATES,
     EARLY_LEAVE_GRACE_MINUTES,
     GRACE_MINUTES,
     LATE_MINUTE_COST,
@@ -668,6 +670,123 @@ def _attach_department(daily, df):
     return daily
 
 
+def _compute_break_minutes(start_str, end_str):
+    """Minutes between two HH:MM:SS punch strings (handles midnight wrap)."""
+    start = datetime.strptime(start_str, "%H:%M:%S")
+    end = datetime.strptime(end_str, "%H:%M:%S")
+    if end < start:
+        end += pd.Timedelta(days=1).to_pytimedelta()
+    return int((end - start).total_seconds() / 60)
+
+
+def _compute_breaks(punches):
+    """Walk one day's break punches in time order and pair them.
+
+    `punches` is a list of (time_str, state_str). Each Break Out opens
+    a window; the next Break In closes it. Anything left unclosed (or
+    a Break In with no open window) is counted as incomplete.
+
+    Returns (break_count, total_break_minutes, incomplete_break_count).
+    """
+    break_count = 0
+    total_minutes = 0
+    incomplete = 0
+    open_at = None
+    out_set = set(BREAK_OUT_STATES)
+    in_set = set(BREAK_IN_STATES)
+    for time_str, state in punches:
+        if state in out_set:
+            if open_at is not None:
+                incomplete += 1  # Previous break-out never closed.
+            open_at = time_str
+        elif state in in_set:
+            if open_at is not None:
+                total_minutes += _compute_break_minutes(open_at, time_str)
+                break_count += 1
+                open_at = None
+            else:
+                incomplete += 1  # Break-in without matching break-out.
+    if open_at is not None:
+        incomplete += 1
+    return break_count, total_minutes, incomplete
+
+
+def _attach_break_info(daily, df):
+    """Add break_count, total_break_minutes, incomplete_break_count to daily.
+
+    Breaks are INFORMATIONAL only -- they never feed lateness,
+    overtime, early leave, payroll, or risk scoring. The columns are
+    surfaced for HR visibility on the Daily Attendance and Break
+    Summary sheets.
+    """
+    all_break_states = set(BREAK_OUT_STATES) | set(BREAK_IN_STATES)
+    break_punches = df[df["Punch State"].isin(all_break_states)]
+
+    if break_punches.empty:
+        daily["break_count"] = 0
+        daily["total_break_minutes"] = 0
+        daily["incomplete_break_count"] = 0
+        return daily
+
+    rows = []
+    for (eid, date), group in break_punches.groupby(["Employee ID", "Date"]):
+        ordered = group.sort_values("Punch Time")
+        punches = list(
+            zip(ordered["Punch Time"].astype(str),
+                ordered["Punch State"].astype(str))
+        )
+        bc, bm, ic = _compute_breaks(punches)
+        rows.append({
+            "Employee ID": eid, "Date": date,
+            "break_count": bc,
+            "total_break_minutes": bm,
+            "incomplete_break_count": ic,
+        })
+    breaks_df = pd.DataFrame(rows)
+    daily = daily.merge(breaks_df, on=["Employee ID", "Date"], how="left")
+    daily["break_count"] = daily["break_count"].fillna(0).astype(int)
+    daily["total_break_minutes"] = daily["total_break_minutes"].fillna(0).astype(int)
+    daily["incomplete_break_count"] = daily["incomplete_break_count"].fillna(0).astype(int)
+    return daily
+
+
+def _build_break_summary(daily):
+    """Per-employee break aggregates for the Break Summary sheet."""
+    cols = [
+        "Employee ID", "First Name", "total_break_count",
+        "total_break_minutes", "avg_break_minutes",
+        "incomplete_break_count",
+    ]
+    if "break_count" not in daily.columns:
+        return pd.DataFrame(columns=cols)
+    grp = (
+        daily.groupby(["Employee ID", "First Name"])
+        .agg(
+            total_break_count=("break_count", "sum"),
+            total_break_minutes=("total_break_minutes", "sum"),
+            incomplete_break_count=("incomplete_break_count", "sum"),
+        )
+        .reset_index()
+    )
+    grp = grp[
+        (grp["total_break_count"] > 0)
+        | (grp["incomplete_break_count"] > 0)
+    ].copy()
+    if grp.empty:
+        return pd.DataFrame(columns=cols)
+    grp["total_break_count"] = grp["total_break_count"].astype(int)
+    grp["total_break_minutes"] = grp["total_break_minutes"].astype(int)
+    grp["incomplete_break_count"] = grp["incomplete_break_count"].astype(int)
+    grp["avg_break_minutes"] = grp.apply(
+        lambda r: int(r["total_break_minutes"] / r["total_break_count"])
+        if r["total_break_count"] else 0,
+        axis=1,
+    )
+    return grp[cols].sort_values(
+        by="total_break_minutes", ascending=False
+    ).reset_index(drop=True)
+
+
 def _attach_exclusion_info(daily, excluded_df, allow_name_match=ALLOW_NAME_BASED_EXCLUSION_MATCH):
     """Stamp each daily row with the four exclusion flags + reason.
 
@@ -778,6 +897,8 @@ def _build_employee_summary(daily):
                 lambda s: int((s == "Early Leave").sum()),
             ),
             total_early_leave_minutes=("early_leave_minutes", "sum"),
+            total_break_count=("break_count", "sum"),
+            total_break_minutes=("total_break_minutes", "sum"),
             is_excluded=("is_excluded", "any"),
             exclusion_reason=("exclusion_reason", "first"),
             excluded_from_late=("excluded_from_late", "any"),
@@ -808,6 +929,13 @@ def _build_employee_summary(daily):
     per_emp["total_overtime_hours"] = (per_emp["total_overtime_minutes"] / 60).round(1)
     per_emp["early_leave_cases"] = per_emp["early_leave_cases"].astype(int)
     per_emp["total_early_leave_minutes"] = per_emp["total_early_leave_minutes"].astype(int)
+    per_emp["total_break_count"] = per_emp["total_break_count"].astype(int)
+    per_emp["total_break_minutes"] = per_emp["total_break_minutes"].astype(int)
+    per_emp["avg_break_minutes"] = per_emp.apply(
+        lambda r: int(r["total_break_minutes"] / r["total_break_count"])
+        if r["total_break_count"] else 0,
+        axis=1,
+    )
     per_emp["avg_late_minutes"] = per_emp.apply(
         lambda r: int(r["total_late_minutes"] / r["late_count"])
         if r["late_count"] else 0,
@@ -853,6 +981,7 @@ def _build_employee_summary(daily):
         "missing_checkout_count", "excuse_count",
         "overtime_cases", "total_overtime_minutes", "total_overtime_hours",
         "early_leave_cases", "total_early_leave_minutes",
+        "total_break_count", "total_break_minutes", "avg_break_minutes",
         "risk_score", "risk_level", "risk_reason",
         "estimated_deduction", "deduction_capped",
         "is_excluded", "exclusion_reason",
@@ -1236,6 +1365,9 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     daily = _attach_checkout_info(daily, df)
     daily = _attach_overtime_info(daily, intervals_lookup)
     daily = _attach_department(daily, df)
+    # Break info is INFORMATIONAL only -- attached before the
+    # exclusion pass and never consumed by any downstream KPI.
+    daily = _attach_break_info(daily, df)
     daily = _attach_exclusion_info(daily, excluded_df)
 
     # KPI aggregates honor exclusions. Raw daily rows remain untouched
@@ -1271,6 +1403,15 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
     avg_overtime_minutes = (
         int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
     )
+
+    # Break aggregates -- purely informational, no exclusion gating.
+    break_summary = _build_break_summary(daily)
+    total_break_count = int(daily["break_count"].sum())
+    total_break_minutes = int(daily["total_break_minutes"].sum())
+    employees_with_breaks = int(
+        daily.loc[daily["break_count"] > 0, "Employee ID"].nunique()
+    )
+    incomplete_break_records = int(daily["incomplete_break_count"].sum())
 
     # Early-leave honors the same exclusion flag as the lateness KPIs.
     early_leave_rows = daily[
@@ -1355,6 +1496,11 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
             daily["early_leave_anomaly"].sum()
             if "early_leave_anomaly" in daily.columns else 0
         ),
+        # Break analytics -- INFORMATIONAL ONLY (never affects any KPI above).
+        "total_break_count": total_break_count,
+        "total_break_minutes": total_break_minutes,
+        "employees_with_breaks": employees_with_breaks,
+        "incomplete_break_records": incomplete_break_records,
         # DataFrames.
         "employee_summary": employee_summary,
         "status_summary": status_summary,
@@ -1367,6 +1513,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None):
         "employee_master": employee_master,
         "top_overtime_employees": top_overtime_employees,
         "top_early_leave_employees": top_early_leave_employees,
+        "break_summary": break_summary,
         "excluded_employees_summary": excluded_employees_summary,
         "excluded_employee_count": int(
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()

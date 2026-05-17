@@ -249,6 +249,13 @@ def _build_dashboard(wb, summary):
         ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
         ("Early Leave Anomalies (review)",
          summary.get("early_leave_anomaly_cases", 0), "#,##0"),
+        # Break analytics -- INFORMATIONAL only, no charts.
+        ("Total Break Count (info)", summary.get("total_break_count", 0), "#,##0"),
+        ("Total Break Minutes (info)", summary.get("total_break_minutes", 0), "#,##0"),
+        ("Employees With Breaks (info)",
+         summary.get("employees_with_breaks", 0), "#,##0"),
+        ("Incomplete Break Records (info)",
+         summary.get("incomplete_break_records", 0), "#,##0"),
     ]
     ws.cell(row=3, column=1, value="Metric")
     ws.cell(row=3, column=2, value="Value")
@@ -489,6 +496,11 @@ def export_report(summary, daily):
         _build_data_sheet(
             wb.create_sheet("Excluded Employees"), excluded_summary
         )
+
+    # Break analytics sheet -- informational, only when breaks exist.
+    break_summary = summary.get("break_summary")
+    if break_summary is not None and not break_summary.empty:
+        _build_data_sheet(wb.create_sheet("Break Summary"), break_summary)
 
     # High-level reconciliation table lives on its own sheet so the
     # Dashboard stays uncluttered.

@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-05-16 (Informational break analytics)
+- Added break detection from attendance punch states. The pairing
+  engine walks each (employee, day) in time order: every Break Out is
+  paired with the next Break In; anything left unmatched becomes an
+  `incomplete_break_count`.
+- Added config `BREAK_OUT_STATES` and `BREAK_IN_STATES` (defaults:
+  Break Out / Break In, Lunch Out / Lunch In, Out Break / In Break,
+  استراحة خروج / استراحة دخول). Override via env if a future BioTime
+  export uses different labels.
+- Added daily columns `break_count`, `total_break_minutes`,
+  `incomplete_break_count`.
+- Added per-employee columns `total_break_count`, `total_break_minutes`,
+  `avg_break_minutes` on `employee_summary`.
+- Added summary KPIs `total_break_count`, `total_break_minutes`,
+  `employees_with_breaks`, `incomplete_break_records`, plus a
+  `break_summary` DataFrame.
+- Excel: four new KPI rows on the Dashboard (no chart) and a new
+  `Break Summary` sheet (only when breaks exist).
+- Claude markdown: new `## Break Analysis` section with the per-
+  employee table and an explicit note that breaks do NOT affect
+  lateness, overtime, early leave, payroll, risk scoring,
+  attendance_status, or data quality score.
+- Added `tests/test_breaks.py` (6 tests): normal pair, multiple breaks
+  same day, missing Break In, missing Break Out, Arabic labels, and
+  an explicit "break punches do not affect any existing KPI"
+  invariant test (69 total).
+
+Real-data impact (one run, exclusion file active):
+  total_break_count:           162
+  total_break_minutes:         9186  (~153h)
+  employees_with_breaks:        19
+  incomplete_break_records:     39
+  late_cases / overtime_cases / early_leave_cases / data_quality_score
+  / payroll totals -- all unchanged.
+
 ## 2026-05-16 (Early-leave anomaly validation)
 - Added `MAX_REASONABLE_EARLY_LEAVE_MINUTES` (default 180) in
   `config.py`. Anything above is flagged as an anomaly.

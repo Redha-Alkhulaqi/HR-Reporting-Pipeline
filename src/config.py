@@ -61,3 +61,19 @@ ALLOW_NAME_BASED_EXCLUSION_MATCH = (
     os.getenv("ALLOW_NAME_BASED_EXCLUSION_MATCH", "true").lower()
     in ("true", "1", "yes")
 )
+
+# Break-out / break-in Punch State labels. Breaks are INFORMATIONAL
+# only -- they never feed lateness, overtime, early leave, payroll, or
+# risk scoring. Comma-separated to support env-driven overrides.
+BREAK_OUT_STATES = [
+    s.strip() for s in os.getenv(
+        "BREAK_OUT_STATES",
+        "Break Out,Lunch Out,Out Break,استراحة خروج",
+    ).split(",") if s.strip()
+]
+BREAK_IN_STATES = [
+    s.strip() for s in os.getenv(
+        "BREAK_IN_STATES",
+        "Break In,Lunch In,In Break,استراحة دخول",
+    ).split(",") if s.strip()
+]
