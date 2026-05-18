@@ -768,12 +768,110 @@ _ABSENCE_DETAILS_COLS = [
     "Employee ID", "First Name", "Date", "Weekday",
     "Is Scheduled Working Day", "Has Attendance",
     "Time Off Type", "Is Permission", "Is Vacation",
-    "Is Secondment", "Is Weekly Off", "Is Holiday",
-    "Is Excluded", "Counted As Absence", "Absence Reason",
+    "Is Secondment", "Weekly Off Days", "Is Weekly Off",
+    "Is Holiday", "Is Excluded",
+    "Counted As Absence", "Absence Reason",
 ]
 
 
+_VALID_WEEKDAYS = (
+    "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday",
+)
+
+
+def _normalize_weekday_token(token):
+    """Best-effort weekday-name normalization (handles abbreviations
+    and case differences). Returns the canonical capitalized name or
+    None when the token is not a recognizable weekday.
+    """
+    if token is None:
+        return None
+    text = str(token).strip().lower()
+    if not text:
+        return None
+    for day in _VALID_WEEKDAYS:
+        d = day.lower()
+        if text == d or text == d[:3] or d.startswith(text):
+            return day
+    return None
+
+
+def _parse_weekly_off_days(value):
+    """Parse a 'Friday,Saturday' style cell into a set of canonical
+    weekday names. Empty / unparseable cells yield an empty set."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return set()
+    text = str(value).strip()
+    if not text:
+        return set()
+    parts = re.split(r"[,;/|]+", text)
+    out = set()
+    for raw in parts:
+        canonical = _normalize_weekday_token(raw)
+        if canonical:
+            out.add(canonical)
+    return out
+
+
+def _build_weekly_off_lookup(weekly_off_df, df,
+                             default_weekly_off=None,
+                             allow_name_match=True):
+    """Return dict {Employee ID: set of weekday names off}.
+
+    Overrides come from `weekly_off_df` (the optional
+    `employee_weekly_off.xlsx`). Match priority: explicit Employee ID
+    row, then normalized name fallback. Employees absent from the
+    override file inherit `default_weekly_off`.
+    """
+    default_set = set(default_weekly_off) if default_weekly_off else set()
+    lookup = {}
+
+    if df is None or df.empty:
+        return lookup
+
+    # Build name -> [ids] map for fallback matching.
+    df_clean = df[df["Employee ID"].notna()].copy()
+    df_clean["First Name"] = df_clean["First Name"].astype(str).str.strip()
+    name_to_ids = {}
+    all_ids = set()
+    for eid, sub in df_clean.groupby("Employee ID"):
+        all_ids.add(eid)
+        non_empty = sub["First Name"][sub["First Name"].astype(bool)]
+        if not non_empty.empty:
+            name_to_ids.setdefault(_normalize_name(non_empty.iloc[0]), []).append(eid)
+
+    # Seed every employee with the global default.
+    for eid in all_ids:
+        lookup[eid] = set(default_set)
+
+    if weekly_off_df is None or weekly_off_df.empty:
+        return lookup
+
+    for _, row in weekly_off_df.iterrows():
+        days = _parse_weekly_off_days(row.get("Weekly Off Days"))
+        if not days:
+            continue
+        raw_id = row.get("Employee ID")
+        eid = None
+        if pd.notna(raw_id):
+            try:
+                eid = int(raw_id)
+            except (ValueError, TypeError):
+                eid = None
+        if eid is not None and eid in lookup:
+            lookup[eid] = days
+            continue
+        if allow_name_match:
+            target = _normalize_name(row.get("Employee Name"))
+            if target and target in name_to_ids:
+                for matched_eid in name_to_ids[target]:
+                    lookup[matched_eid] = days
+    return lookup
+
+
 def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
+                            weekly_off_df=None,
                             period_start=None, period_end=None):
     """Return one row per (employee, date) explaining why a day was or
     was not counted as an absence.
@@ -900,8 +998,17 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
     scheduled_names = set(
         schedules_df["Name"].dropna().astype(str).str.strip()
     )
-    weekly_off_set = set(WEEKLY_OFF_DAYS)
+    # Per-employee weekly off: caller-supplied overrides win, otherwise
+    # the global WEEKLY_OFF_DAYS default applies.
+    weekly_off_lookup = _build_weekly_off_lookup(
+        weekly_off_df, df,
+        default_weekly_off=WEEKLY_OFF_DAYS,
+        allow_name_match=ALLOW_NAME_BASED_EXCLUSION_MATCH,
+    )
     holiday_set = set(PUBLIC_HOLIDAYS)
+
+    def _format_off_days(days):
+        return ",".join(d for d in _VALID_WEEKDAYS if d in days)
 
     rows = []
     for eid in sorted(emp_to_name.keys()):
@@ -909,9 +1016,11 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         has_schedule = bool(name) and name in scheduled_names
         is_excluded = eid in excluded_ids
         emp_timeoff = timeoff_by_id.get(eid, {})
+        emp_off_days = weekly_off_lookup.get(eid, set(WEEKLY_OFF_DAYS))
+        emp_off_days_label = _format_off_days(emp_off_days)
         for date_str in period_dates:
             weekday = pd.to_datetime(date_str).strftime("%A")
-            is_weekly_off = weekday in weekly_off_set
+            is_weekly_off = weekday in emp_off_days
             is_holiday = date_str in holiday_set
             is_scheduled = (
                 has_schedule and not is_weekly_off and not is_holiday
@@ -960,6 +1069,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 "Is Permission": is_permission,
                 "Is Vacation": is_vacation,
                 "Is Secondment": is_secondment,
+                "Weekly Off Days": emp_off_days_label,
                 "Is Weekly Off": is_weekly_off,
                 "Is Holiday": is_holiday,
                 "Is Excluded": is_excluded,
@@ -971,6 +1081,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
 
 _ABSENCE_AUDIT_COLS = [
     "Employee ID", "First Name",
+    "weekly_off_days", "scheduled_weekdays",
     "scheduled_working_days", "attended_days",
     "permission_days", "vacation_days", "secondment_days",
     "absence_days", "reconciliation_delta",
@@ -989,6 +1100,9 @@ def _build_absence_audit(absence_details):
     working day (priority: attended > permission > vacation >
     secondment > absence) so a non-zero `reconciliation_delta` flags a
     bookkeeping inconsistency for HR to investigate.
+
+    `weekly_off_days` is the per-employee off-day policy (e.g.
+    "Friday,Saturday"); `scheduled_weekdays` is the complement.
     """
     if absence_details is None or absence_details.empty:
         return pd.DataFrame(columns=_ABSENCE_AUDIT_COLS)
@@ -1036,6 +1150,20 @@ def _build_absence_audit(absence_details):
            + grp["vacation_days"] + grp["secondment_days"]
            + grp["absence_days"])
     )
+
+    # Attach the per-employee weekly off policy (and its complement)
+    # so the audit row tells HR exactly which weekdays drove the
+    # scheduled-working-days figure.
+    off_lookup = (
+        df.groupby("Employee ID")["Weekly Off Days"].first().to_dict()
+    )
+    grp["weekly_off_days"] = grp["Employee ID"].map(off_lookup).fillna("")
+
+    def _complement_weekdays(off_label):
+        off = _parse_weekly_off_days(off_label)
+        return ",".join(d for d in _VALID_WEEKDAYS if d not in off)
+
+    grp["scheduled_weekdays"] = grp["weekly_off_days"].apply(_complement_weekdays)
     return grp[_ABSENCE_AUDIT_COLS].sort_values(
         by=["reconciliation_delta", "absence_days", "First Name"],
         ascending=[False, False, True],
@@ -1861,7 +1989,8 @@ def filter_inputs_for_report(df, schedules_df, time_off_df, excluded_df):
 
 
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
-                      alias_audit=None, period_start=None, period_end=None):
+                      alias_audit=None, period_start=None, period_end=None,
+                      weekly_off_df=None):
     # Build the source-of-truth intervals lookup ONCE; derive the
     # single-time lookups from it so all three views stay consistent
     # even when shifts are split.
@@ -1923,6 +2052,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     # ledger so the headline numbers always trace back to the audit.
     absence_details = _build_absence_details(
         daily, df, schedules_df, time_off_df, excluded_df,
+        weekly_off_df=weekly_off_df,
         period_start=period_start, period_end=period_end,
     )
     absence_audit = _build_absence_audit(absence_details)

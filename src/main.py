@@ -28,6 +28,7 @@ from data_loader import (
     apply_employee_id_aliases,
     load_attendance_file,
     load_employee_id_aliases_file,
+    load_employee_weekly_off_file,
     load_excluded_employees_file,
     load_time_off_file,
     load_working_schedule_file,
@@ -178,10 +179,14 @@ def main(argv=None):
         aliases_df = load_employee_id_aliases_file(
             PROJECT_ROOT / "data/employee_id_aliases.xlsx"
         )
+        weekly_off_df = load_employee_weekly_off_file(
+            PROJECT_ROOT / "data/employee_weekly_off.xlsx"
+        )
         logger.info(
             f"Input files loaded: attendance={len(df)} schedules={len(schedules_df)} "
             f"time_off={len(time_off_df) if time_off_df is not None else 0} "
-            f"exclusions={len(excluded_df)} aliases={len(aliases_df)}"
+            f"exclusions={len(excluded_df)} aliases={len(aliases_df)} "
+            f"weekly_off_overrides={len(weekly_off_df)}"
         )
 
         # Apply alias mapping IMMEDIATELY after loading so every
@@ -233,6 +238,7 @@ def main(argv=None):
             df, schedules_df, time_off_df,
             excluded_df=excluded_df, alias_audit=alias_audit,
             period_start=period_start, period_end=period_end,
+            weekly_off_df=weekly_off_df,
         )
         logger.info(
             f"Metrics computed: daily_rows={len(daily)} "
@@ -261,6 +267,7 @@ def main(argv=None):
                     r_df, r_sched, r_tof,
                     excluded_df=None, alias_audit=alias_audit,
                     period_start=period_start, period_end=period_end,
+                    weekly_off_df=weekly_off_df,
                 )
             logger.info(f"Excluded employees hidden from report: {hidden}")
 

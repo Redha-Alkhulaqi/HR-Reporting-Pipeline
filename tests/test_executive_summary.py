@@ -302,8 +302,9 @@ ABSENCE_DETAILS_COLUMNS = [
     "Employee ID", "First Name", "Date", "Weekday",
     "Is Scheduled Working Day", "Has Attendance",
     "Time Off Type", "Is Permission", "Is Vacation",
-    "Is Secondment", "Is Weekly Off", "Is Holiday",
-    "Is Excluded", "Counted As Absence", "Absence Reason",
+    "Is Secondment", "Weekly Off Days", "Is Weekly Off",
+    "Is Holiday", "Is Excluded",
+    "Counted As Absence", "Absence Reason",
 ]
 
 
@@ -396,3 +397,123 @@ def test_absence_audit_balance_equation():
     assert ali["secondment_days"] == 1     # 05-06
     # No warnings emitted because every employee balances.
     assert summary["absence_audit_breaks"] == []
+
+
+def _two_employee_schedules():
+    return pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+        {"Name": "ZAIN-EMP2", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+
+
+def _two_week_period_df():
+    """Fri 05-01 .. Thu 05-14 (14 calendar days). Each employee has
+    at least one punch so they enter the reporting universe; the
+    contiguous period covers the full two weeks."""
+    rows = []
+    for d in ("2026-05-01", "2026-05-14"):
+        rows.append(_punch(1, "ALI-EMP1", d, "08:00:00", "Check In"))
+        rows.append(_punch(1, "ALI-EMP1", d, "17:00:00", "Check Out"))
+        rows.append(_punch(2, "ZAIN-EMP2", d, "08:00:00", "Check In"))
+        rows.append(_punch(2, "ZAIN-EMP2", d, "17:00:00", "Check Out"))
+    return pd.DataFrame(rows)
+
+
+def test_default_friday_only_weekly_off_excludes_friday_from_absence():
+    df = _two_week_period_df()
+    summary, _ = calculate_metrics(df, _two_employee_schedules())
+    audit = summary["absence_audit"]
+    ali = audit[audit["Employee ID"] == 1].iloc[0]
+    # 14 days minus 2 Fridays = 12 scheduled working days.
+    assert ali["scheduled_working_days"] == 12
+    assert ali["weekly_off_days"] == "Friday"
+    # No Friday is counted as absence in the per-row ledger.
+    details = summary["absence_details"]
+    fridays = details[
+        (details["Employee ID"] == 1) & (details["Weekday"] == "Friday")
+    ]
+    assert (fridays["Is Weekly Off"] == True).all()  # noqa: E712
+    assert (fridays["Counted As Absence"] == False).all()  # noqa: E712
+
+
+def test_per_employee_friday_plus_saturday_off():
+    """Custom override file removes Saturdays from ALI's absence
+    calculation while ZAIN still uses the global default."""
+    df = _two_week_period_df()
+    weekly_off = pd.DataFrame([
+        {"Employee ID": 1, "Employee Name": "ALI-EMP1",
+         "Weekly Off Days": "Friday,Saturday", "Notes": ""},
+    ])
+    summary, _ = calculate_metrics(
+        df, _two_employee_schedules(), weekly_off_df=weekly_off,
+    )
+    audit = summary["absence_audit"]
+    ali = audit[audit["Employee ID"] == 1].iloc[0]
+    zain = audit[audit["Employee ID"] == 2].iloc[0]
+
+    # ALI: 14 days - 2 Fridays - 2 Saturdays = 10 scheduled working days.
+    assert ali["scheduled_working_days"] == 10
+    assert ali["weekly_off_days"] == "Friday,Saturday"
+    assert "Saturday" not in ali["scheduled_weekdays"]
+    # ZAIN keeps the global Friday-only default = 12 working days.
+    assert zain["scheduled_working_days"] == 12
+    assert zain["weekly_off_days"] == "Friday"
+
+    details = summary["absence_details"]
+    ali_saturdays = details[
+        (details["Employee ID"] == 1) & (details["Weekday"] == "Saturday")
+    ]
+    assert (ali_saturdays["Is Weekly Off"] == True).all()  # noqa: E712
+    assert (ali_saturdays["Counted As Absence"] == False).all()  # noqa: E712
+    # ZAIN's Saturdays must remain scheduled.
+    zain_saturdays = details[
+        (details["Employee ID"] == 2) & (details["Weekday"] == "Saturday")
+    ]
+    assert (zain_saturdays["Is Weekly Off"] == False).all()  # noqa: E712
+
+
+def test_per_employee_custom_rotation_off_days():
+    """An employee on a Mon+Tue rotation still gets the override
+    respected, even though the rest of the company is Friday-off."""
+    df = _two_week_period_df()
+    weekly_off = pd.DataFrame([
+        {"Employee ID": 1, "Employee Name": "ALI-EMP1",
+         "Weekly Off Days": "Monday,Tuesday", "Notes": "Custom rotation"},
+    ])
+    summary, _ = calculate_metrics(
+        df, _two_employee_schedules(), weekly_off_df=weekly_off,
+    )
+    audit = summary["absence_audit"]
+    ali = audit[audit["Employee ID"] == 1].iloc[0]
+    # 14-day period contains 2 Mondays and 2 Tuesdays = 4 off days.
+    assert ali["scheduled_working_days"] == 14 - 4
+    assert ali["weekly_off_days"] == "Monday,Tuesday"
+
+    details = summary["absence_details"]
+    rotation_days = details[
+        (details["Employee ID"] == 1)
+        & details["Weekday"].isin(["Monday", "Tuesday"])
+    ]
+    assert (rotation_days["Is Weekly Off"] == True).all()  # noqa: E712
+    assert (rotation_days["Counted As Absence"] == False).all()  # noqa: E712
+
+
+def test_weekly_off_never_counts_as_absence_even_without_attendance():
+    df = _two_week_period_df()
+    weekly_off = pd.DataFrame([
+        {"Employee ID": 1, "Employee Name": "ALI-EMP1",
+         "Weekly Off Days": "Friday,Saturday", "Notes": ""},
+    ])
+    summary, _ = calculate_metrics(
+        df, _two_employee_schedules(), weekly_off_df=weekly_off,
+    )
+    details = summary["absence_details"]
+    # ALI has no Check In on 2026-05-08 (Friday) or 2026-05-09 (Saturday)
+    # but neither must be counted as absence.
+    weekly_off_rows = details[
+        (details["Employee ID"] == 1)
+        & details["Date"].isin(["2026-05-08", "2026-05-09"])
+    ]
+    assert (weekly_off_rows["Has Attendance"] == False).all()  # noqa: E712
+    assert (weekly_off_rows["Counted As Absence"] == False).all()  # noqa: E712
+    assert (weekly_off_rows["Is Weekly Off"] == True).all()  # noqa: E712

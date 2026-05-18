@@ -46,6 +46,35 @@ def load_excluded_employees_file(file_path):
     return _load_table(file_path, "exclusion file")
 
 
+_WEEKLY_OFF_COLUMNS = [
+    "Employee ID", "Employee Name", "Weekly Off Days", "Notes",
+]
+
+
+def load_employee_weekly_off_file(file_path):
+    """Load per-employee weekly off day overrides (OPTIONAL).
+
+    Schema (one row per employee that deviates from the global
+    WEEKLY_OFF_DAYS default):
+      Employee ID       -- integer (preferred; matched first)
+      Employee Name     -- fallback identifier when ID is missing
+      Weekly Off Days   -- comma-separated weekday names, e.g.
+                           "Friday,Saturday"
+      Notes             -- free text for HR context (optional)
+
+    Employees absent from this file fall back to config.WEEKLY_OFF_DAYS.
+    Returns an empty DataFrame with the expected schema when the file
+    is missing so callers can treat the feature as a no-op.
+    """
+    if not file_path.exists():
+        print(
+            f"No employee weekly-off file at {file_path}; "
+            "using global WEEKLY_OFF_DAYS for every employee."
+        )
+        return pd.DataFrame(columns=_WEEKLY_OFF_COLUMNS)
+    return _load_table(file_path, "employee weekly off file")
+
+
 _ALIAS_COLUMNS = [
     "Old Employee ID", "Current Employee ID", "Employee Name",
     "Source", "Active", "Notes",
