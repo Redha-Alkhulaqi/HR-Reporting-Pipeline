@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.0.0 - HR Reporting Pipeline (2026-05-18)
+
+First production release.
+
+### Highlights
+- Production-ready monthly HR attendance reporting pipeline.
+- BioTime punches + Odoo HR (`resource.resource`, `hr.leave`) ingestion.
+- Five-state attendance classification: Missing Schedule, Leave,
+  Approved Excuse, Late, On Time -- with Leave winning over Excuse
+  (Rule 3).
+- Robust schedule matching: EMP code -> NBSP-normalized exact name ->
+  stripped-EMP name -> unique substring. Handles the real-world
+  Odoo-export quirk where a non-breaking space inside an employee
+  name previously caused Missing Schedule.
+- Employee ID alias mapping for legacy BioTime device IDs, applied
+  before validation so every downstream metric sees the canonical ID.
+- Manual punch correction workflow with approval / evidence gates and
+  a rejection audit sheet.
+- Per-employee weekly-off overrides.
+- Policy-based exclusions with per-KPI flags and an optional "hide
+  excluded from report" mode.
+- Split-shift handling: matched-interval logic so morning-only
+  employees on a morning/evening schedule reconcile correctly.
+- Night-shift wrap (Check Out before Check In rolls to next day).
+- Partial-hourly excuse overlap reduces the delay window.
+- Overtime detection with grace and minimum thresholds, anomaly
+  flagging, dedicated Overtime + Top Overtime sheets.
+- Early-leave detection with anomaly flagging and dedicated sheet.
+- Break analytics (informational only) with break-after-policy
+  (first 60 minutes/day ignored).
+- Auditable absence ledger: per-(employee, date) with reconciliation
+  delta (scheduled_working_days vs attended + permission + vacation +
+  secondment + absence).
+- Compound risk score (0-100) and configurable payroll deduction
+  estimation with monthly cap.
+- Executive Employee Summary with 11 columns (Absence / Permission /
+  Vacation / Secondment days; Late / Overtime / Early Leave / Break /
+  Break After Policy hours) using policy thresholds: 15-min late
+  grace, 5-min early-leave grace, 60-min break free period.
+- Excel dashboard with embedded charts and a dozen audit sheets
+  (Schedule Lookup Audit, Absence Details, Absence Audit, Employee
+  ID Alias Audit, Employee Reconciliation Details, Employee Master,
+  Excluded Employees, Manual Punch Rejections, etc.).
+- Claude-ready Markdown brief with auto-generated Executive Summary.
+- Auditable data quality score (0-100).
+- pytest suite: 119 tests across 13 modules.
+
+### Tagging
+- Annotated git tag `v1.0.0` on commit 35b7f5b.
+- GitHub Release published at
+  https://github.com/Redha-Alkhulaqi/HR-Reporting-Pipeline/releases/tag/v1.0.0
+
 ## 2026-05-17 (Employee ID alias mapping for historical BioTime IDs)
 - New optional input `data/employee_id_aliases.xlsx` with columns:
   Old Employee ID, Current Employee ID, Employee Name, Source,
