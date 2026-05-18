@@ -883,6 +883,81 @@ def _absence_counts_from_details(absence_details):
     )
 
 
+# Time Off Type values containing any of these substrings (case-insensitive)
+# are treated as SECONDMENT. Everything else that is not an excuse falls
+# under VACATION (Annual / Sick / unpaid / etc.).
+_SECONDMENT_KEYWORDS = ("secondment", "انتداب", "ندب", "intidab")
+
+
+def _is_secondment_type(type_name):
+    if type_name is None:
+        return False
+    text = str(type_name).lower()
+    return any(kw.lower() in text for kw in _SECONDMENT_KEYWORDS)
+
+
+def _build_timeoff_day_counts_by_category(daily, time_off_df):
+    """Return (permission_by_id, vacation_by_id, secondment_by_id).
+
+    Each dict maps Employee ID -> integer count of distinct reporting-
+    period dates where the employee held approved time off of that
+    category. Categories are mutually exclusive at the (row, day) level:
+
+      Secondment : Time Off Type contains a secondment keyword.
+      Permission : Time Off Type is an excuse (partial hourly permission).
+      Vacation   : every other approved time-off row (Annual / Sick / ...).
+
+    Only dates that appear in the reporting period (the union of dates
+    in `daily`) are counted so the figures match what the rest of the
+    report covers.
+    """
+    empty = ({}, {}, {})
+    if daily.empty or time_off_df is None or time_off_df.empty:
+        return empty
+
+    period_dates = set(daily["Date"].astype(str).unique())
+    name_to_id = {}
+    for eid, name in daily.groupby("Employee ID")["First Name"].first().items():
+        if pd.notna(name):
+            name_to_id[str(name).strip()] = eid
+
+    approved = time_off_df[time_off_df["Status"] == "Approved"].copy()
+    if approved.empty:
+        return empty
+    approved["Employee"] = approved["Employee"].astype(str).str.strip()
+    approved["Start Date"] = pd.to_datetime(approved["Start Date"], errors="coerce")
+    approved["End Date"] = pd.to_datetime(approved["End Date"], errors="coerce")
+    approved = approved.dropna(subset=["Start Date", "End Date"])
+
+    permission, vacation, secondment = {}, {}, {}
+
+    for _, row in approved.iterrows():
+        eid = name_to_id.get(row["Employee"])
+        if eid is None:
+            continue
+        type_name = row["Time Off Type"]
+        if _is_secondment_type(type_name):
+            bucket = secondment
+        elif _is_excuse_type(type_name):
+            bucket = permission
+        else:
+            bucket = vacation
+        for d in pd.date_range(
+            row["Start Date"].normalize(),
+            row["End Date"].normalize(),
+            freq="D",
+        ):
+            ds = d.strftime("%Y-%m-%d")
+            if ds in period_dates:
+                bucket.setdefault(eid, set()).add(ds)
+
+    return (
+        {k: len(v) for k, v in permission.items()},
+        {k: len(v) for k, v in vacation.items()},
+        {k: len(v) for k, v in secondment.items()},
+    )
+
+
 # Executive-summary tuning. These thresholds intentionally DIFFER from
 # the pipeline-wide constants so HR can present a stricter or looser
 # headline figure without changing the underlying daily classification.
@@ -891,14 +966,28 @@ _EXEC_EARLY_LEAVE_GRACE_MINUTES = 5
 _BREAK_POLICY_FREE_MINUTES = 60
 
 
-def _build_executive_employee_summary(daily, absence_by_id):
-    """Build the 8-column executive view of per-employee totals.
+_EXECUTIVE_SUMMARY_COLUMNS = [
+    "Employee ID", "First Name",
+    "No of Absence Days", "No of Permission Days",
+    "No of Vacation Days", "No of Secondment Days",
+    "Total Late (Hours)", "Total Over Time (Hours)",
+    "Total Early Leave (Hours)",
+    "Break Time (Hours)", "Break Time (After Policy)",
+]
+
+
+def _build_executive_employee_summary(daily, absence_by_id,
+                                      permission_by_id, vacation_by_id,
+                                      secondment_by_id):
+    """Build the 11-column executive view of per-employee totals.
 
     Columns (exact names, in order):
-      Employee ID, First Name, No of Absence Days,
+      Employee ID, First Name,
+      No of Absence Days, No of Permission Days,
+      No of Vacation Days, No of Secondment Days,
       Total Late (Hours), Total Over Time (Hours),
-      Total Early Leave (Hours), Break Time (Hours),
-      Break Time (After Policy)
+      Total Early Leave (Hours),
+      Break Time (Hours), Break Time (After Policy)
 
     Late and Early Leave use their OWN executive grace thresholds
     (15 and 5 minutes) so the executive figure is independent of the
@@ -906,23 +995,25 @@ def _build_executive_employee_summary(daily, absence_by_id):
     ignores the first 60 break minutes per day and counts only the
     excess. `absence_by_id` is the audited count from
     `_build_absence_details` -- weekly-off days and holidays are
-    already excluded.
+    already excluded. Employees flagged via the exclusion file are
+    dropped entirely from this executive view.
     """
-    cols = [
-        "Employee ID", "First Name", "No of Absence Days",
-        "Total Late (Hours)", "Total Over Time (Hours)",
-        "Total Early Leave (Hours)", "Break Time (Hours)",
-        "Break Time (After Policy)",
-    ]
+    cols = _EXECUTIVE_SUMMARY_COLUMNS
     if daily.empty:
         return pd.DataFrame(columns=cols)
 
+    visible = daily
+    if "is_excluded" in daily.columns:
+        visible = daily[~daily["is_excluded"]]
+    if visible.empty:
+        return pd.DataFrame(columns=cols)
+
     work = pd.DataFrame({
-        "Employee ID": daily["Employee ID"],
-        "First Name": daily["First Name"],
+        "Employee ID": visible["Employee ID"],
+        "First Name": visible["First Name"],
     })
 
-    raw_delay = daily["Delay Minutes"].clip(lower=0).astype(int)
+    raw_delay = visible["Delay Minutes"].clip(lower=0).astype(int)
     work["_late_min"] = raw_delay.where(raw_delay > _EXEC_LATE_GRACE_MINUTES, 0)
 
     # Raw early-leave gap = matched Shift End - Check Out (clamped >= 0).
@@ -937,13 +1028,13 @@ def _build_executive_employee_summary(daily, absence_by_id):
         gap = int((se - co).total_seconds() / 60)
         return max(0, gap)
 
-    raw_early = daily.apply(_raw_early, axis=1)
+    raw_early = visible.apply(_raw_early, axis=1)
     work["_early_leave_min"] = raw_early.where(
         raw_early > _EXEC_EARLY_LEAVE_GRACE_MINUTES, 0
     )
 
-    work["_overtime_min"] = daily["overtime_minutes"].astype(int)
-    work["_break_min"] = daily["total_break_minutes"].astype(int)
+    work["_overtime_min"] = visible["overtime_minutes"].astype(int)
+    work["_break_min"] = visible["total_break_minutes"].astype(int)
     work["_break_after_policy_min"] = (
         work["_break_min"] - _BREAK_POLICY_FREE_MINUTES
     ).clip(lower=0)
@@ -959,7 +1050,18 @@ def _build_executive_employee_summary(daily, absence_by_id):
         )
     )
 
-    grp["No of Absence Days"] = grp["Employee ID"].map(absence_by_id).fillna(0).astype(int)
+    grp["No of Absence Days"] = (
+        grp["Employee ID"].map(absence_by_id).fillna(0).astype(int)
+    )
+    grp["No of Permission Days"] = (
+        grp["Employee ID"].map(permission_by_id).fillna(0).astype(int)
+    )
+    grp["No of Vacation Days"] = (
+        grp["Employee ID"].map(vacation_by_id).fillna(0).astype(int)
+    )
+    grp["No of Secondment Days"] = (
+        grp["Employee ID"].map(secondment_by_id).fillna(0).astype(int)
+    )
     grp["Total Late (Hours)"] = (grp["late_min"] / 60).round(1)
     grp["Total Over Time (Hours)"] = (grp["overtime_min"] / 60).round(1)
     grp["Total Early Leave (Hours)"] = (grp["early_leave_min"] / 60).round(1)
@@ -1719,10 +1821,16 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     absence_details = _build_absence_details(daily, schedules_df, time_off_df)
     absence_by_id = _absence_counts_from_details(absence_details)
 
-    # Executive view of the Employee Summary sheet (8 named columns,
+    # Executive view of the Employee Summary sheet (11 named columns,
     # hours-based, independent grace thresholds). Lives alongside the
     # internal employee_summary so the Markdown / charts keep working.
-    executive_employee_summary = _build_executive_employee_summary(daily, absence_by_id)
+    permission_by_id, vacation_by_id, secondment_by_id = (
+        _build_timeoff_day_counts_by_category(daily, time_off_df)
+    )
+    executive_employee_summary = _build_executive_employee_summary(
+        daily, absence_by_id,
+        permission_by_id, vacation_by_id, secondment_by_id,
+    )
 
     # Break aggregates -- purely informational, no exclusion gating.
     break_summary = _build_break_summary(daily)

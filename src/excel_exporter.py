@@ -105,11 +105,18 @@ def _build_data_sheet(ws, df):
 def _build_executive_employee_sheet(ws, df):
     """Render the simplified executive Employee Summary sheet.
 
-    8 columns expected (in this exact order):
-        Employee ID, First Name, No of Absence Days,
-        Total Late (Hours), Total Over Time (Hours),
-        Total Early Leave (Hours), Break Time (Hours),
-        Break Time (After Policy).
+    11 columns expected (in this exact order):
+        1.  Employee ID
+        2.  First Name
+        3.  No of Absence Days
+        4.  No of Permission Days
+        5.  No of Vacation Days
+        6.  No of Secondment Days
+        7.  Total Late (Hours)
+        8.  Total Over Time (Hours)
+        9.  Total Early Leave (Hours)
+        10. Break Time (Hours)
+        11. Break Time (After Policy)
 
     Apply executive-friendly formatting: bold header, frozen header,
     auto-filter, centered numeric cells, thousands separator on integer
@@ -129,19 +136,20 @@ def _build_executive_employee_sheet(ws, df):
     if ws.max_row <= 1:
         return
 
-    # Integer columns: Employee ID (1), No of Absence Days (3).
+    # Integer columns: Employee ID (1) plus the four day-count columns
+    # (3 Absence, 4 Permission, 5 Vacation, 6 Secondment).
     _format_numeric_cells(
         ws,
         rows=range(2, ws.max_row + 1),
-        cols=[1, 3],
+        cols=[1, 3, 4, 5, 6],
         number_format="#,##0",
     )
-    # Hour columns: 4 (Late), 5 (Overtime), 6 (Early Leave),
-    # 7 (Break), 8 (Break after policy).
+    # Hour columns (1 decimal): 7 Late, 8 Overtime, 9 Early Leave,
+    # 10 Break, 11 Break after policy.
     _format_numeric_cells(
         ws,
         rows=range(2, ws.max_row + 1),
-        cols=[4, 5, 6, 7, 8],
+        cols=[7, 8, 9, 10, 11],
         number_format="0.0",
     )
 
@@ -441,9 +449,11 @@ def _build_dashboard(wb, summary):
     if emp_ws.max_row > 1:
         n_late = min(10, emp_ws.max_row - 1)
         # Executive sheet cols: 1=Employee ID, 2=First Name,
-        # 3=No of Absence Days, 4=Total Late (Hours), ...
+        # 3=Absence, 4=Permission, 5=Vacation, 6=Secondment,
+        # 7=Total Late (Hours), 8=Overtime, 9=Early Leave,
+        # 10=Break, 11=Break After Policy.
         late_labels = Reference(emp_ws, min_col=2, min_row=2, max_row=1 + n_late)
-        late_values = Reference(emp_ws, min_col=4, min_row=2, max_row=1 + n_late)
+        late_values = Reference(emp_ws, min_col=7, min_row=2, max_row=1 + n_late)
         ws.add_chart(
             _bar_chart("Top Late Employees", late_labels, late_values,
                        horizontal=True),

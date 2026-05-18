@@ -4,10 +4,12 @@ from metrics_calculator import calculate_metrics
 
 
 EXECUTIVE_COLUMNS = [
-    "Employee ID", "First Name", "No of Absence Days",
+    "Employee ID", "First Name",
+    "No of Absence Days", "No of Permission Days",
+    "No of Vacation Days", "No of Secondment Days",
     "Total Late (Hours)", "Total Over Time (Hours)",
-    "Total Early Leave (Hours)", "Break Time (Hours)",
-    "Break Time (After Policy)",
+    "Total Early Leave (Hours)",
+    "Break Time (Hours)", "Break Time (After Policy)",
 ]
 
 
@@ -22,7 +24,7 @@ def _punch(employee_id, name, date, time, state):
     }
 
 
-def test_executive_summary_has_exact_8_columns():
+def test_executive_summary_has_exact_11_columns():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
         _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
@@ -190,3 +192,104 @@ def test_approved_leave_does_not_count_as_absence():
     exec_df = summary["executive_employee_summary"]
     ali = exec_df[exec_df["Employee ID"] == 1].iloc[0]
     assert ali["No of Absence Days"] == 0
+    # Annual Leave classifies as a Vacation Day (not Permission, not Secondment).
+    assert ali["No of Vacation Days"] == 1
+    assert ali["No of Permission Days"] == 0
+    assert ali["No of Secondment Days"] == 0
+
+
+def test_permission_vacation_and_secondment_day_counts():
+    """Each approved time-off type is bucketed correctly:
+       - استأذان / "Permission" -> No of Permission Days
+       - Annual Leave / Sick Leave -> No of Vacation Days
+       - Secondment / انتداب -> No of Secondment Days
+    """
+    df = pd.DataFrame([
+        # ALI checks in on three other days so he is in the reporting
+        # population. The time-off-only days fill the buckets below.
+        _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "17:00:00", "Check Out"),
+        _punch(1, "ALI-EMP1", "2026-05-03", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-03", "17:00:00", "Check Out"),
+        _punch(1, "ALI-EMP1", "2026-05-06", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-06", "17:00:00", "Check Out"),
+        # Colleague punches on the time-off-only dates so they enter the
+        # reporting period.
+        _punch(2, "ZAIN-EMP2", "2026-05-04", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-04", "17:00:00", "Check Out"),
+        _punch(2, "ZAIN-EMP2", "2026-05-05", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-05", "17:00:00", "Check Out"),
+        _punch(2, "ZAIN-EMP2", "2026-05-07", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-07", "17:00:00", "Check Out"),
+    ])
+    schedules = pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+        {"Name": "ZAIN-EMP2", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+    time_off = pd.DataFrame([
+        # Permission (excuse).
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-04 08:00:00",
+         "End Date": "2026-05-04 10:00:00",
+         "Time Off Type": "استأذان"},
+        # Vacation (Annual Leave) -- two days.
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-05 00:00:00",
+         "End Date": "2026-05-05 23:59:00",
+         "Time Off Type": "Annual Leave"},
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-07 00:00:00",
+         "End Date": "2026-05-07 23:59:00",
+         "Time Off Type": "Sick Leave"},
+        # Secondment (English).
+        {"Employee": "ZAIN-EMP2", "Status": "Approved",
+         "Start Date": "2026-05-01 00:00:00",
+         "End Date": "2026-05-02 23:59:00",
+         "Time Off Type": "Secondment"},
+        # Secondment (Arabic).
+        {"Employee": "ZAIN-EMP2", "Status": "Approved",
+         "Start Date": "2026-05-03 00:00:00",
+         "End Date": "2026-05-03 23:59:00",
+         "Time Off Type": "انتداب"},
+    ])
+    summary, _ = calculate_metrics(df, schedules, time_off)
+    exec_df = summary["executive_employee_summary"]
+
+    ali = exec_df[exec_df["Employee ID"] == 1].iloc[0]
+    assert ali["No of Permission Days"] == 1
+    assert ali["No of Vacation Days"] == 2
+    assert ali["No of Secondment Days"] == 0
+
+    zain = exec_df[exec_df["Employee ID"] == 2].iloc[0]
+    assert zain["No of Permission Days"] == 0
+    assert zain["No of Vacation Days"] == 0
+    assert zain["No of Secondment Days"] == 3
+
+
+def test_excluded_employees_are_dropped_from_executive_summary():
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
+        _punch(2, "ZAIN-EMP2", "2026-05-01", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-01", "17:00:00", "Check Out"),
+    ])
+    schedules = pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+        {"Name": "ZAIN-EMP2", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+    excluded = pd.DataFrame([{
+        "Employee ID": 2,
+        "Employee Name": "ZAIN-EMP2",
+        "Exclusion Reason": "Test exclusion",
+        "Notes": "",
+        "Exclude From Late": True,
+        "Exclude From Overtime": True,
+        "Exclude From Payroll Deduction": True,
+        "Exclude From Risk Scoring": True,
+    }])
+    summary, _ = calculate_metrics(df, schedules, excluded_df=excluded)
+    exec_df = summary["executive_employee_summary"]
+    assert 2 not in exec_df["Employee ID"].tolist()
+    assert 1 in exec_df["Employee ID"].tolist()
