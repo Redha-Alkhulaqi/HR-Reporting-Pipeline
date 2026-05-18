@@ -447,10 +447,10 @@ def generate_ai_input_file(metrics, attendance_daily):
         ot_payable_min = metrics.get("total_overtime_payable_minutes", 0)
         f.write(
             f"- Overtime cases: **{ot_cases}**\n"
-            f"- Total overtime (raw duration): **{ot_hours} hours** "
+            f"- **Total Over Time (Hours) (Actual):** **{ot_hours} hours** "
             f"({metrics.get('total_overtime_minutes', 0)} minutes)\n"
             f"- Overtime payroll multiplier: **{ot_mult:g}x**\n"
-            f"- Total overtime (payable, after multiplier): "
+            f"- **Total Over Time (Payable 1.5x) (Hours):** "
             f"**{ot_payable_hours} hours** ({ot_payable_min} minutes)\n"
             f"- Employees with overtime: **{ot_emps}**\n"
             f"- Average overtime per case (raw): **{ot_avg} minutes**\n\n"
@@ -468,14 +468,16 @@ def generate_ai_input_file(metrics, attendance_daily):
             "contribute to overtime. Accuracy depends on the Odoo "
             "Working Time labels reflecting each employee's true shift.\n"
             "\n"
-            f"> **Payroll note:** Overtime is reported as **both** the raw "
-            f"physical duration (`overtime_minutes` / `total_overtime_hours`) "
-            f"and a payroll-adjusted duration (`overtime_payable_minutes` / "
-            f"`total_overtime_payable_hours`). The current payroll multiplier "
-            f"is **{ot_mult:g}x** (config: `OVERTIME_PAY_MULTIPLIER`). Set "
-            f"it to `1.0` to disable the premium without touching code. "
-            f"Per-row rounding: half-up to the nearest minute (so 1:30 "
-            f"raw -> 2:15 payable at 1.5x).\n"
+            f"> **Payroll note:** Actual overtime hours are preserved "
+            f"for audit and operational analysis. Payable overtime "
+            f"hours apply the global {ot_mult:g}x payroll multiplier. "
+            f"The Employee Summary sheet exposes both side-by-side as "
+            f"`Total Over Time (Hours) (Actual)` and "
+            f"`Total Over Time (Payable 1.5x) (Hours)`. Multiplier "
+            f"config: `OVERTIME_PAY_MULTIPLIER` (set to `1.0` to "
+            f"disable the premium without touching code). Per-row "
+            f"rounding: half-up to the nearest minute "
+            f"(1:30 actual -> 2:15 payable at 1.5x).\n"
         )
 
         dept_summary = metrics.get("department_summary")

@@ -185,7 +185,7 @@ For days where an employee genuinely worked but the device missed the punch (bat
 
 ## 8. Employee Summary Sheet (Executive View)
 
-The **Employee Summary** sheet exposes 11 columns aimed at HR / payroll review:
+The **Employee Summary** sheet exposes 12 columns aimed at HR / payroll review:
 
 | # | Column | Type |
 |---|---|---|
@@ -196,10 +196,13 @@ The **Employee Summary** sheet exposes 11 columns aimed at HR / payroll review:
 | 5 | No of Vacation Days | Integer (Annual / Sick / etc.) |
 | 6 | No of Secondment Days | Integer (انتداب) |
 | 7 | Total Late (Hours) | Decimal (1 dp) |
-| 8 | Total Over Time (Hours) | Decimal (1 dp) |
-| 9 | Total Early Leave (Hours) | Decimal (1 dp) |
-| 10 | Break Time (Hours) | Decimal (1 dp) |
-| 11 | Break Time (After Policy) | Decimal (1 dp) |
+| 8 | Total Over Time (Hours) (Actual) | Decimal (1 dp) |
+| 9 | Total Over Time (Payable 1.5x) (Hours) | Decimal (1 dp; green highlight) |
+| 10 | Total Early Leave (Hours) | Decimal (1 dp) |
+| 11 | Break Time (Hours) | Decimal (1 dp) |
+| 12 | Break Time (After Policy) | Decimal (1 dp) |
+
+> **Overtime audit note:** Actual overtime hours are preserved for audit and operational analysis. Payable overtime hours apply the global 1.5x payroll multiplier (config: `OVERTIME_PAY_MULTIPLIER`). Per-row payable minutes are rounded half-up to the nearest minute; hour values display to 1 dp. Worked examples (1 dp display): `10.5 → 15.8`, `4.2 → 6.3`, `39.4 → 59.1`. The Payable column is highlighted in green on the Employee Summary sheet, and an explanatory Notes block is appended below the data. See [§14](#14--overtime-payroll-multiplier) for the architecture.
 
 ### Business definitions
 

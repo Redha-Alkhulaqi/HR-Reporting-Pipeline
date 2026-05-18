@@ -1683,7 +1683,11 @@ _EXECUTIVE_SUMMARY_COLUMNS = [
     "Employee ID", "First Name",
     "No of Absence Days", "No of Permission Days",
     "No of Vacation Days", "No of Secondment Days",
-    "Total Late (Hours)", "Total Over Time (Hours)",
+    "Total Late (Hours)",
+    # Overtime is reported in two parallel columns so HR sees both
+    # the auditable physical duration AND the payroll-adjusted total:
+    "Total Over Time (Hours) (Actual)",
+    "Total Over Time (Payable 1.5x) (Hours)",
     "Total Early Leave (Hours)",
     "Break Time (Hours)", "Break Time (After Policy)",
 ]
@@ -1692,13 +1696,15 @@ _EXECUTIVE_SUMMARY_COLUMNS = [
 def _build_executive_employee_summary(daily, absence_by_id,
                                       permission_by_id, vacation_by_id,
                                       secondment_by_id):
-    """Build the 11-column executive view of per-employee totals.
+    """Build the 12-column executive view of per-employee totals.
 
     Columns (exact names, in order):
       Employee ID, First Name,
       No of Absence Days, No of Permission Days,
       No of Vacation Days, No of Secondment Days,
-      Total Late (Hours), Total Over Time (Hours),
+      Total Late (Hours),
+      Total Over Time (Hours) (Actual),
+      Total Over Time (Payable 1.5x) (Hours),
       Total Early Leave (Hours),
       Break Time (Hours), Break Time (After Policy)
 
@@ -1710,6 +1716,13 @@ def _build_executive_employee_summary(daily, absence_by_id,
     `_build_absence_details` -- weekly-off days and holidays are
     already excluded. Employees flagged via the exclusion file are
     dropped entirely from this executive view.
+
+    Overtime is reported in TWO parallel columns so HR sees both the
+    physical worked duration AND the payroll-adjusted total. Actual
+    overtime hours are preserved for audit and operational analysis.
+    Payable overtime hours apply the global 1.5x payroll multiplier
+    (config: OVERTIME_PAY_MULTIPLIER) using the per-row payable
+    minutes already computed by `_apply_overtime_payroll_adjustment`.
     """
     cols = _EXECUTIVE_SUMMARY_COLUMNS
     if daily.empty:
@@ -1747,6 +1760,17 @@ def _build_executive_employee_summary(daily, absence_by_id,
     )
 
     work["_overtime_min"] = visible["overtime_minutes"].astype(int)
+    # The centralized payroll-adjustment layer guarantees this column
+    # exists; fall back to raw * configured multiplier if a stale
+    # daily dataframe is ever passed in.
+    if "overtime_payable_minutes" in visible.columns:
+        work["_overtime_payable_min"] = (
+            visible["overtime_payable_minutes"].astype(int)
+        )
+    else:
+        work["_overtime_payable_min"] = work["_overtime_min"].map(
+            lambda m: _round_half_up(m * float(OVERTIME_PAY_MULTIPLIER))
+        )
     work["_break_min"] = visible["total_break_minutes"].astype(int)
     work["_break_after_policy_min"] = (
         work["_break_min"] - _BREAK_POLICY_FREE_MINUTES
@@ -1757,6 +1781,7 @@ def _build_executive_employee_summary(daily, absence_by_id,
         .agg(
             late_min=("_late_min", "sum"),
             overtime_min=("_overtime_min", "sum"),
+            overtime_payable_min=("_overtime_payable_min", "sum"),
             early_leave_min=("_early_leave_min", "sum"),
             break_min=("_break_min", "sum"),
             break_after_policy_min=("_break_after_policy_min", "sum"),
@@ -1776,7 +1801,22 @@ def _build_executive_employee_summary(daily, absence_by_id,
         grp["Employee ID"].map(secondment_by_id).fillna(0).astype(int)
     )
     grp["Total Late (Hours)"] = (grp["late_min"] / 60).round(1)
-    grp["Total Over Time (Hours)"] = (grp["overtime_min"] / 60).round(1)
+    grp["Total Over Time (Hours) (Actual)"] = (grp["overtime_min"] / 60).round(1)
+    # Payable column at the EXECUTIVE level applies the formula from
+    # the mockup directly: Payable (Hours) = Actual (Hours) * 1.5,
+    # then rounded to 1 decimal place. This matches every worked
+    # example in the spec (10.5 -> 15.8, 4.2 -> 6.3, 39.4 -> 59.1,
+    # 27.4 -> 41.1, 1.3 -> 2.0) and keeps the relationship between
+    # the two columns trivially auditable.
+    # NB: the per-row `overtime_payable_minutes` on the daily DataFrame
+    # is still computed by half-up rounding the per-row minute totals;
+    # the Overtime detail sheet uses that finer-grained value. The
+    # executive total can differ from the sum of per-row payable
+    # minutes by at most a couple of minutes due to compounded rounding;
+    # this is the intended audit behavior.
+    grp["Total Over Time (Payable 1.5x) (Hours)"] = (
+        grp["Total Over Time (Hours) (Actual)"] * OVERTIME_PAY_MULTIPLIER
+    ).round(1)
     grp["Total Early Leave (Hours)"] = (grp["early_leave_min"] / 60).round(1)
     grp["Break Time (Hours)"] = (grp["break_min"] / 60).round(1)
     grp["Break Time (After Policy)"] = (grp["break_after_policy_min"] / 60).round(1)

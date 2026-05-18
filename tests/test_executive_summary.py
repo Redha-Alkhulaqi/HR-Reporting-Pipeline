@@ -7,7 +7,9 @@ EXECUTIVE_COLUMNS = [
     "Employee ID", "First Name",
     "No of Absence Days", "No of Permission Days",
     "No of Vacation Days", "No of Secondment Days",
-    "Total Late (Hours)", "Total Over Time (Hours)",
+    "Total Late (Hours)",
+    "Total Over Time (Hours) (Actual)",
+    "Total Over Time (Payable 1.5x) (Hours)",
     "Total Early Leave (Hours)",
     "Break Time (Hours)", "Break Time (After Policy)",
 ]
@@ -24,7 +26,7 @@ def _punch(employee_id, name, date, time, state):
     }
 
 
-def test_executive_summary_has_exact_11_columns():
+def test_executive_summary_has_exact_12_columns():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
         _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
@@ -32,6 +34,52 @@ def test_executive_summary_has_exact_11_columns():
     summary, _ = calculate_metrics(df, _schedules())
     exec_df = summary["executive_employee_summary"]
     assert list(exec_df.columns) == EXECUTIVE_COLUMNS
+
+
+def test_payable_overtime_column_uses_1_5x_actual():
+    """Mockup examples for the new payable column. All hour values are
+    rounded to 1 decimal place ("All hour values are rounded to 1
+    decimal place using standard rounding"):
+
+      Actual 10.5h -> Payable 15.8h
+      Actual  4.2h -> Payable  6.3h
+      Actual 39.4h -> Payable 59.1h
+
+    Each scenario splits the target minutes across N days with a
+    constant per-day overtime chunk above MIN_OVERTIME_MINUTES so the
+    per-day classifier always fires.
+    """
+    cases = [
+        # (total_overtime_min, per_day_overtime_min, expected_actual_h, expected_payable_h)
+        (630,  210, 10.5, 15.8),   # 3 days * 3h30 -> 15.75 -> 15.8 (1 dp)
+        (252,  126,  4.2,  6.3),   # 2 days * 2h06 ->  6.30 ->  6.3 (1 dp)
+        (2364, 197, 39.4, 59.1),   # 12 days * 3h17 -> 59.10 -> 59.1 (1 dp)
+    ]
+    for total_min, per_day_min, expected_actual, expected_payable in cases:
+        assert per_day_min >= 30, "per-day OT must clear MIN_OVERTIME_MINUTES"
+        n_days = total_min // per_day_min
+        assert n_days * per_day_min == total_min, "case must be exact"
+
+        rows = []
+        for d in range(1, n_days + 1):
+            date = f"2026-05-{d:02d}"
+            check_out_total = 17 * 60 + per_day_min     # 17:00 + per-day OT
+            h, m = divmod(check_out_total, 60)
+            rows.append(_punch(1, "ALI-EMP1", date, "08:00:00", "Check In"))
+            rows.append(_punch(
+                1, "ALI-EMP1", date,
+                f"{h:02d}:{m:02d}:00", "Check Out",
+            ))
+        summary, _ = calculate_metrics(pd.DataFrame(rows), _schedules())
+        row = summary["executive_employee_summary"].iloc[0]
+        assert row["Total Over Time (Hours) (Actual)"] == expected_actual, (
+            f"actual mismatch for {total_min} min: "
+            f"got {row['Total Over Time (Hours) (Actual)']}"
+        )
+        assert row["Total Over Time (Payable 1.5x) (Hours)"] == expected_payable, (
+            f"payable mismatch for {total_min} min: "
+            f"got {row['Total Over Time (Payable 1.5x) (Hours)']}"
+        )
 
 
 def test_late_under_grace_counts_zero_hours():

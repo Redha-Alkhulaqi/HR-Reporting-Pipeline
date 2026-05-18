@@ -102,10 +102,96 @@ def _build_data_sheet(ws, df):
     _autosize_columns(ws)
 
 
+_PAYABLE_OT_HEADER_FILL = PatternFill("solid", fgColor="548235")   # dark green
+_PAYABLE_OT_BODY_FILL = PatternFill("solid", fgColor="E2EFDA")      # light green
+_PAYABLE_OT_BORDER_GREEN = "548235"
+_NOTES_TITLE_FILL = PatternFill("solid", fgColor="DDEBF7")          # light blue
+
+
+def _apply_payable_overtime_styling(ws, payable_col_idx):
+    """Highlight the payable-overtime column to match the mockup.
+
+    - Header cell: dark-green fill with the standard bold-white font.
+    - Body cells: light-green fill, bold black font, centered.
+    - Adds a thin dark-green border on left/right of every body cell
+      and on the bottom of the header so the column visually pops
+      out from its neighbors (like the green block in the mockup).
+    """
+    from openpyxl.styles import Border, Side
+    if ws.max_row < 1:
+        return
+    header_cell = ws.cell(row=1, column=payable_col_idx)
+    header_cell.fill = _PAYABLE_OT_HEADER_FILL
+    # The shared _style_header_row already set white-bold font; keep it.
+
+    side = Side(style="thin", color=_PAYABLE_OT_BORDER_GREEN)
+    body_border = Border(left=side, right=side)
+    header_border = Border(left=side, right=side, bottom=side)
+    header_cell.border = header_border
+
+    for r in range(2, ws.max_row + 1):
+        cell = ws.cell(row=r, column=payable_col_idx)
+        cell.fill = _PAYABLE_OT_BODY_FILL
+        cell.font = Font(bold=True, color="000000")
+        cell.alignment = _CENTER
+        cell.border = body_border
+
+
+def _append_executive_notes_block(ws, n_cols):
+    """Append the Overtime Payable notes block at the bottom of the
+    Employee Summary sheet, matching the mockup.
+
+    The block sits two rows below the data, spans 6 columns, and
+    documents the formula, rounding, and that actual overtime is
+    preserved alongside payable.
+    """
+    start_row = ws.max_row + 3
+
+    # Title row.
+    title_cell = ws.cell(row=start_row, column=1, value=
+                         "Notes -- Overtime Payable (1.5x)")
+    title_cell.font = Font(bold=True, size=12, color="1F4E79")
+    title_cell.fill = _NOTES_TITLE_FILL
+    ws.merge_cells(start_row=start_row, start_column=1,
+                   end_row=start_row, end_column=min(6, n_cols))
+
+    notes = [
+        "Overtime is now reported with a payroll multiplier of 1.5 for all employees.",
+        "Column H (Total Over Time (Hours) (Actual)) = Actual overtime duration "
+        "(physical hours worked beyond schedule).",
+        "Column I (Total Over Time (Payable 1.5x) (Hours)) = Payable overtime "
+        "hours after applying the 1.5x multiplier.",
+        "Formula: Payable Overtime (Hours) = Actual Overtime (Hours) x 1.5.",
+        "Rounding: per-row payable minutes are rounded half-up to the nearest "
+        "minute; hour values displayed to 1 decimal place.",
+        "Actual overtime hours are preserved for audit and operational analysis. "
+        "Payable overtime hours apply the global 1.5x payroll multiplier.",
+        "Multiplier is configured via OVERTIME_PAY_MULTIPLIER; set to 1.0 to "
+        "disable the premium without code changes.",
+    ]
+    for i, line in enumerate(notes, start=1):
+        c = ws.cell(row=start_row + i, column=1, value=f"•  {line}")
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.merge_cells(start_row=start_row + i, start_column=1,
+                       end_row=start_row + i,
+                       end_column=min(6, n_cols))
+        ws.row_dimensions[start_row + i].height = 18
+
+    # Closing badge row.
+    badge_row = start_row + len(notes) + 1
+    badge = ws.cell(row=badge_row, column=1,
+                    value="Multiplier applied globally: 1.5x")
+    badge.font = Font(bold=True, color="1F4E79")
+    badge.fill = _NOTES_TITLE_FILL
+    badge.alignment = _CENTER
+    ws.merge_cells(start_row=badge_row, start_column=1,
+                   end_row=badge_row, end_column=min(6, n_cols))
+
+
 def _build_executive_employee_sheet(ws, df):
     """Render the simplified executive Employee Summary sheet.
 
-    11 columns expected (in this exact order):
+    12 columns expected (in this exact order):
         1.  Employee ID
         2.  First Name
         3.  No of Absence Days
@@ -113,14 +199,18 @@ def _build_executive_employee_sheet(ws, df):
         5.  No of Vacation Days
         6.  No of Secondment Days
         7.  Total Late (Hours)
-        8.  Total Over Time (Hours)
-        9.  Total Early Leave (Hours)
-        10. Break Time (Hours)
-        11. Break Time (After Policy)
+        8.  Total Over Time (Hours) (Actual)
+        9.  Total Over Time (Payable 1.5x) (Hours)
+        10. Total Early Leave (Hours)
+        11. Break Time (Hours)
+        12. Break Time (After Policy)
 
     Apply executive-friendly formatting: bold header, frozen header,
-    auto-filter, centered numeric cells, thousands separator on integer
-    columns, and 1-decimal display on hour columns.
+    auto-filter, centered numeric cells, thousands separator on
+    integer columns, 1-decimal display on all hour columns. Column 9
+    (Payable Overtime) is visually highlighted in green to mirror the
+    mockup, and a Notes block is appended below the data describing
+    the formula, rounding, and audit semantics.
     """
     if df is None or df.empty:
         ws.append(["(no data)"])
@@ -129,29 +219,36 @@ def _build_executive_employee_sheet(ws, df):
         ws.append(_sanitize_row(row))
     _style_header_row(ws, row=1, n_cols=ws.max_column)
     ws.freeze_panes = "A2"
-    if ws.max_row > 1:
-        ws.auto_filter.ref = ws.dimensions
+    data_end_row = ws.max_row
+    if data_end_row > 1:
+        ws.auto_filter.ref = (
+            f"A1:{get_column_letter(ws.max_column)}{data_end_row}"
+        )
     _autosize_columns(ws)
 
-    if ws.max_row <= 1:
+    if data_end_row <= 1:
         return
 
     # Integer columns: Employee ID (1) plus the four day-count columns
     # (3 Absence, 4 Permission, 5 Vacation, 6 Secondment).
     _format_numeric_cells(
         ws,
-        rows=range(2, ws.max_row + 1),
+        rows=range(2, data_end_row + 1),
         cols=[1, 3, 4, 5, 6],
         number_format="#,##0",
     )
-    # Hour columns (1 decimal): 7 Late, 8 Overtime, 9 Early Leave,
-    # 10 Break, 11 Break after policy.
+    # All hour columns at 1 decimal: 7 Late, 8 OT Actual, 9 OT Payable,
+    # 10 Early Leave, 11 Break, 12 Break After Policy.
     _format_numeric_cells(
         ws,
-        rows=range(2, ws.max_row + 1),
-        cols=[7, 8, 9, 10, 11],
+        rows=range(2, data_end_row + 1),
+        cols=[7, 8, 9, 10, 11, 12],
         number_format="0.0",
     )
+    # Visually highlight the payable-overtime column.
+    _apply_payable_overtime_styling(ws, payable_col_idx=9)
+    # Append the Notes block at the bottom.
+    _append_executive_notes_block(ws, n_cols=ws.max_column)
 
 
 def _apply_daily_conditional_formatting(ws, df):
@@ -296,12 +393,12 @@ def _build_dashboard(wb, summary):
         ("Estimated Deduction (capped)", summary.get("total_deduction_capped", 0),
          "#,##0.00"),
         ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
-        ("Total Overtime Hours (Raw)",
+        ("Total Over Time (Hours) (Actual)",
          summary.get("total_overtime_hours", 0), "0.0"),
         ("Overtime Multiplier",
          summary.get("overtime_multiplier", 1.0), "0.00"),
-        ("Total Overtime Hours (Payable)",
-         summary.get("total_overtime_payable_hours", 0), "0.0"),
+        ("Total Over Time (Payable 1.5x) (Hours)",
+         summary.get("total_overtime_payable_hours", 0), "0.00"),
         ("Early Leave Cases", summary.get("early_leave_cases", 0), "#,##0"),
         ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
         ("Early Leave Anomalies (review)",
