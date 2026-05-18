@@ -296,7 +296,12 @@ def _build_dashboard(wb, summary):
         ("Estimated Deduction (capped)", summary.get("total_deduction_capped", 0),
          "#,##0.00"),
         ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
-        ("Total Overtime Hours", summary.get("total_overtime_hours", 0), "0.0"),
+        ("Total Overtime Hours (Raw)",
+         summary.get("total_overtime_hours", 0), "0.0"),
+        ("Overtime Multiplier",
+         summary.get("overtime_multiplier", 1.0), "0.00"),
+        ("Total Overtime Hours (Payable)",
+         summary.get("total_overtime_payable_hours", 0), "0.0"),
         ("Early Leave Cases", summary.get("early_leave_cases", 0), "#,##0"),
         ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
         ("Early Leave Anomalies (review)",
@@ -544,6 +549,8 @@ def export_report(summary, daily):
                 "matched_scheduled_minutes",
                 "overtime_minutes", "overtime_status",
                 "overtime_policy", "overtime_calculation_note",
+                "overtime_multiplier",
+                "overtime_payable_minutes", "overtime_payable_hours",
             ]],
         )
 

@@ -42,6 +42,13 @@ MAX_MONTHLY_DEDUCTION = float(os.getenv("MAX_MONTHLY_DEDUCTION", "500.0"))
 OVERTIME_GRACE_MINUTES = int(os.getenv("OVERTIME_GRACE_MINUTES", "15"))
 MIN_OVERTIME_MINUTES = int(os.getenv("MIN_OVERTIME_MINUTES", "30"))
 
+# OVERTIME_PAY_MULTIPLIER: payroll premium applied to every minute of
+# overtime AFTER classification. The pipeline keeps `overtime_minutes`
+# as the raw physical duration; the multiplier surfaces in a parallel
+# `overtime_payable_minutes` field. Default 1.5 (standard 150% rate);
+# set to 1.0 to disable the premium without touching code.
+OVERTIME_PAY_MULTIPLIER = float(os.getenv("OVERTIME_PAY_MULTIPLIER", "1.5"))
+
 # Early-leave rule. A Check Out before Shift End counts as Early Leave
 # only when the gap exceeds this grace window.
 EARLY_LEAVE_GRACE_MINUTES = int(os.getenv("EARLY_LEAVE_GRACE_MINUTES", "10"))

@@ -88,6 +88,7 @@ Risk scoring (compound, replaces the old minutes-only band)
   score. risk_reason is a short, human-readable text composed from the
   contributing factors.
 """
+import math
 import re
 from datetime import datetime
 
@@ -104,6 +105,7 @@ from config import (
     MAX_REASONABLE_EARLY_LEAVE_MINUTES,
     MIN_OVERTIME_MINUTES,
     OVERTIME_GRACE_MINUTES,
+    OVERTIME_PAY_MULTIPLIER,
     PUBLIC_HOLIDAYS,
     RISK_HIGH_THRESHOLD,
     RISK_MEDIUM_THRESHOLD,
@@ -1093,6 +1095,53 @@ def _attach_overtime_info(daily, intervals_lookup, policy_overrides=None):
     daily["matched_scheduled_minutes"] = daily["matched_scheduled_minutes"].astype(int)
     daily["overtime_minutes"] = daily["overtime_minutes"].astype(int)
     daily["early_leave_minutes"] = daily["early_leave_minutes"].astype(int)
+    return daily
+
+
+def _round_half_up(value):
+    """Round to the nearest integer with ties going UP.
+
+    Python's built-in `round()` uses banker's rounding (ties to even)
+    which is unintuitive for payroll: 4.5 -> 4, 5.5 -> 6. Half-up
+    rounding gives 4.5 -> 5 and 5.5 -> 6, matching payroll convention
+    and the user's worked examples (1:30 * 1.5 = 2:15).
+    """
+    return int(math.floor(float(value) + 0.5))
+
+
+def _apply_overtime_payroll_adjustment(daily, multiplier=OVERTIME_PAY_MULTIPLIER):
+    """Centralized payroll-adjustment layer.
+
+    Runs AFTER every overtime classification (standard matched-interval
+    AND special policies like TOTAL_SPAN_MINUS_8H) is complete, so the
+    multiplier never needs to be duplicated inside individual policy
+    branches. Mutates `daily` in place and returns it for chaining.
+
+    Adds three audit columns to every row:
+      - `overtime_payable_minutes` -- the per-row payable duration in
+        minutes (`overtime_minutes * multiplier`, half-up rounded to
+        the nearest minute). 0 stays 0.
+      - `overtime_payable_hours`   -- payable_minutes / 60, rounded
+        to one decimal place; mirrors the existing per-row hours
+        convention.
+      - `overtime_multiplier`      -- the multiplier itself, stored
+        per row so the Overtime sheet is self-documenting (a future
+        per-employee override could vary this per row without
+        downstream code changes).
+
+    Raw `overtime_minutes` and `overtime_status` are NEVER mutated.
+    Backward compatibility: a caller that ignores the new columns
+    sees byte-identical raw fields.
+    """
+    if "overtime_minutes" not in daily.columns:
+        # _attach_overtime_info was never called -- nothing to adjust.
+        return daily
+
+    raw = daily["overtime_minutes"].fillna(0).astype(int)
+    payable = raw.map(lambda m: _round_half_up(m * float(multiplier)))
+    daily["overtime_payable_minutes"] = payable.astype(int)
+    daily["overtime_payable_hours"] = (payable / 60).round(1)
+    daily["overtime_multiplier"] = float(multiplier)
     return daily
 
 
@@ -2110,21 +2159,36 @@ def _build_top_overtime_employees(daily):
                 "Employee ID", "First Name",
                 "overtime_cases", "total_overtime_minutes",
                 "avg_overtime_minutes", "total_overtime_hours",
+                "total_overtime_payable_minutes",
+                "total_overtime_payable_hours",
             ]
+        )
+    agg_kwargs = {
+        "overtime_cases": ("overtime_minutes", "size"),
+        "total_overtime_minutes": ("overtime_minutes", "sum"),
+        "avg_overtime_minutes": ("overtime_minutes", "mean"),
+    }
+    has_payable = "overtime_payable_minutes" in ot_rows.columns
+    if has_payable:
+        agg_kwargs["total_overtime_payable_minutes"] = (
+            "overtime_payable_minutes", "sum",
         )
     top = (
         ot_rows.groupby(["Employee ID", "First Name"])
-        .agg(
-            overtime_cases=("overtime_minutes", "size"),
-            total_overtime_minutes=("overtime_minutes", "sum"),
-            avg_overtime_minutes=("overtime_minutes", "mean"),
-        )
+        .agg(**agg_kwargs)
         .reset_index()
         .sort_values("total_overtime_minutes", ascending=False)
     )
     top["total_overtime_minutes"] = top["total_overtime_minutes"].astype(int)
     top["avg_overtime_minutes"] = top["avg_overtime_minutes"].astype(int)
     top["total_overtime_hours"] = (top["total_overtime_minutes"] / 60).round(1)
+    if has_payable:
+        top["total_overtime_payable_minutes"] = (
+            top["total_overtime_payable_minutes"].astype(int)
+        )
+        top["total_overtime_payable_hours"] = (
+            top["total_overtime_payable_minutes"] / 60
+        ).round(1)
     return top.reset_index(drop=True)
 
 
@@ -2565,6 +2629,10 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         daily, intervals_lookup,
         policy_overrides=overtime_policy_overrides,
     )
+    # Centralized payroll-adjustment layer: applies the OVERTIME_PAY_MULTIPLIER
+    # uniformly to every row AFTER classification, so the multiplier is
+    # never duplicated inside individual policy branches.
+    daily = _apply_overtime_payroll_adjustment(daily)
     daily = _attach_department(daily, df)
     # Break info is INFORMATIONAL only -- attached before the
     # exclusion pass and never consumed by any downstream KPI.
@@ -2602,6 +2670,13 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     overtime_cases = int(len(overtime_rows))
     total_overtime_minutes = int(overtime_rows["overtime_minutes"].sum())
     total_overtime_hours = round(total_overtime_minutes / 60, 1)
+    # Payroll-adjusted totals run alongside the raw totals so HR can
+    # see both: physical duration on one side, payable duration on the
+    # other. Exclusion filtering matches the raw totals exactly.
+    total_overtime_payable_minutes = int(
+        overtime_rows["overtime_payable_minutes"].sum()
+    ) if "overtime_payable_minutes" in overtime_rows.columns else 0
+    total_overtime_payable_hours = round(total_overtime_payable_minutes / 60, 1)
     employees_with_overtime = int(overtime_rows["Employee ID"].nunique()) if overtime_cases else 0
     avg_overtime_minutes = (
         int(overtime_rows["overtime_minutes"].mean()) if overtime_cases else 0
@@ -2731,12 +2806,20 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         "unscheduled_active_employees": unscheduled_active,
         "invalid_punches_count": invalid_punches,
         "data_quality_score": data_quality_score,
-        # Overtime KPIs.
+        # Overtime KPIs (raw physical duration -- unchanged for
+        # backward compatibility with every prior report).
         "overtime_cases": overtime_cases,
         "total_overtime_minutes": total_overtime_minutes,
         "total_overtime_hours": total_overtime_hours,
         "employees_with_overtime": employees_with_overtime,
         "avg_overtime_minutes": avg_overtime_minutes,
+        # Overtime KPIs (payroll-adjusted = raw * OVERTIME_PAY_MULTIPLIER).
+        # New parallel fields; raw fields above are untouched. HR/payroll
+        # should use the payable totals; auditors can reconcile against
+        # the raw totals using the multiplier.
+        "overtime_multiplier": OVERTIME_PAY_MULTIPLIER,
+        "total_overtime_payable_minutes": total_overtime_payable_minutes,
+        "total_overtime_payable_hours": total_overtime_payable_hours,
         # Early leave KPIs.
         "early_leave_cases": early_leave_cases,
         "total_early_leave_minutes": total_early_leave_minutes,

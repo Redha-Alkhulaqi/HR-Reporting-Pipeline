@@ -76,15 +76,26 @@ Actual Worked Hours - Scheduled Shift Hours
 
 If Work Hours is zero or missing, do not count overtime, even if BioTime has an OT value. Classify as Overtime Without Work Hours.
 
-### 10.1 Payroll Multiplier (current behavior)
-**Overtime is reported as actual overtime duration only. This pipeline does not apply a 1.5x payroll/pay-rate multiplier. Any payroll multiplier must be handled separately outside this report unless explicitly added in a future release.**
+### 10.1 Payroll Multiplier (current behavior: 1.5x active)
+**Overtime is reported in two parallel forms: the raw physical duration AND a payroll-adjusted (payable) duration. A global `1.5x` payroll multiplier is applied to every minute of overtime AFTER classification. The multiplier is the single config constant `OVERTIME_PAY_MULTIPLIER` and can be set per environment.**
+
+Rule:
+```
+overtime_payable_minutes = round_half_up(overtime_minutes * OVERTIME_PAY_MULTIPLIER)
+```
+
+Defaults:
+- `OVERTIME_PAY_MULTIPLIER = 1.5` (set to `1.0` to disable the premium without touching code).
+- Rounding: half-up to the nearest minute (Python's built-in `round()` uses banker's rounding; we use half-up for payroll predictability).
+- Examples: `2:00` raw → `3:00` payable; `1:30` raw → `2:15` payable.
 
 Implications for downstream consumers:
-- `overtime_minutes`, `total_overtime_hours`, and `Total Over Time (Hours)` are the **physical worked durations beyond the scheduled shift**, not amounts of payable overtime.
-- Premium-rate overtime pay (e.g. 1.5x) must be calculated in payroll using these duration fields as inputs.
-- The `LATE_MINUTE_COST` / `estimated_deduction` / `deduction_capped` figures apply to **lateness only**, and never to overtime.
+- **Raw fields are NEVER mutated.** `overtime_minutes`, `total_overtime_hours`, and `Total Over Time (Hours)` continue to mean the **physical worked duration beyond the scheduled shift**, exactly as in every prior report.
+- **Payable fields are new and parallel:** `overtime_payable_minutes`, `overtime_payable_hours`, `total_overtime_payable_minutes`, `total_overtime_payable_hours`, and `overtime_multiplier`. HR/payroll should use the payable totals; auditors can reconcile against raw using the multiplier.
+- The multiplier is applied **once**, in a centralized payroll-adjustment layer (`_apply_overtime_payroll_adjustment` in `src/metrics_calculator.py`), AFTER every overtime classifier (standard and `TOTAL_SPAN_MINUS_8H`) has produced raw `overtime_minutes`. Policy branches never need to know about the multiplier.
+- The `LATE_MINUTE_COST` / `estimated_deduction` / `deduction_capped` figures still apply to **lateness only**, and never to overtime.
 
-If a future release adds a payroll multiplier, the agreed extension point is documented in README §14 (config constant + derived aggregate field; the per-row duration must remain unchanged).
+For the full architecture, field schema, rounding rules, and per-employee override extension path, see README §14.
 
 ## 11. Abnormal Attendance
 If Check-in occurs after Shift End:
