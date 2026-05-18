@@ -66,7 +66,7 @@ Each step is independently testable (see `tests/`). The flow is orchestrated by 
 ### Time-tracking KPIs
 - **Late grace**: thresholds are checked, then the *full* lateness is counted.
 - **Overtime analytics**: matched-interval-aware overtime detection, anomaly flags, dashboard KPIs, dedicated Overtime sheet, Top Overtime chart.
-  - **Payroll note:** Overtime is currently reported as **actual overtime duration only**. **No 1.5x (or any) payroll multiplier is applied by this pipeline.** Any premium-rate overtime pay must be applied downstream in payroll. See [§14 — Overtime Payroll Multiplier](#14--overtime-payroll-multiplier-future-extension-point) for the safest place to add one later.
+  - **Payroll note:** Overtime is reported as actual overtime duration only. This pipeline does not apply a 1.5x payroll/pay-rate multiplier. Any payroll multiplier must be handled separately outside this report unless explicitly added in a future release. See [§14 — Overtime Payroll Multiplier](#14--overtime-payroll-multiplier-future-extension-point) for the agreed extension point.
 - **Early leave analytics**: matched-interval-aware early-leave detection with anomaly flagging.
 - **Break analytics**: pair-walked Break In / Break Out punches; informational only (never affects KPIs).
 - **Break after-policy calculation**: first 60 minutes of break per day ignored; only the excess counts.
@@ -305,7 +305,7 @@ Full release notes: <https://github.com/Redha-Alkhulaqi/HR-Reporting-Pipeline/re
 
 ## 14. Overtime Payroll Multiplier (future extension point)
 
-> **Current behavior (v1.0.0):** Overtime is reported as **actual duration only**. There is no `1.5x` (or any) payroll multiplier anywhere in the calculation, export, or report layers.
+> **Current behavior (v1.0.0):** Overtime is reported as actual overtime duration only. This pipeline does not apply a 1.5x payroll/pay-rate multiplier. Any payroll multiplier must be handled separately outside this report unless explicitly added in a future release.
 
 If a premium-rate overtime payroll calculation is needed in the future, the safest place to add it is a **derived field at aggregation time** — not inside the per-row classifier. Specifically:
 

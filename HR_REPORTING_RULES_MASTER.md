@@ -76,6 +76,16 @@ Actual Worked Hours - Scheduled Shift Hours
 
 If Work Hours is zero or missing, do not count overtime, even if BioTime has an OT value. Classify as Overtime Without Work Hours.
 
+### 10.1 Payroll Multiplier (current behavior)
+**Overtime is reported as actual overtime duration only. This pipeline does not apply a 1.5x payroll/pay-rate multiplier. Any payroll multiplier must be handled separately outside this report unless explicitly added in a future release.**
+
+Implications for downstream consumers:
+- `overtime_minutes`, `total_overtime_hours`, and `Total Over Time (Hours)` are the **physical worked durations beyond the scheduled shift**, not amounts of payable overtime.
+- Premium-rate overtime pay (e.g. 1.5x) must be calculated in payroll using these duration fields as inputs.
+- The `LATE_MINUTE_COST` / `estimated_deduction` / `deduction_capped` figures apply to **lateness only**, and never to overtime.
+
+If a future release adds a payroll multiplier, the agreed extension point is documented in README §14 (config constant + derived aggregate field; the per-row duration must remain unchanged).
+
 ## 11. Abnormal Attendance
 If Check-in occurs after Shift End:
 - Classify as Abnormal Attendance
