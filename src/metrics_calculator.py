@@ -1106,7 +1106,8 @@ def _build_weekly_off_lookup(weekly_off_df, df,
 
 def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                             weekly_off_df=None,
-                            period_start=None, period_end=None):
+                            period_start=None, period_end=None,
+                            schedule_lookup=None):
     """Return one row per (employee, date) explaining why a day was or
     was not counted as an absence.
 
@@ -1229,9 +1230,15 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             if rule is not None and any(rule["flags"].values()):
                 excluded_ids.add(eid)
 
-    scheduled_names = set(
-        schedules_df["Name"].dropna().astype(str).str.strip()
-    )
+    # Resolve scheduling presence via the multi-key matcher so an Odoo
+    # name with NBSP or only-an-EMP-code still counts as "scheduled".
+    if schedule_lookup is None:
+        label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+        schedule_lookup = ScheduleLookup(schedules_df, label_column=label_col)
+    has_schedule_by_name = {
+        n: bool(schedule_lookup.match(n)["intervals"])
+        for n in {n for n in emp_to_name.values() if n}
+    }
     # Per-employee weekly off: caller-supplied overrides win, otherwise
     # the global WEEKLY_OFF_DAYS default applies.
     weekly_off_lookup = _build_weekly_off_lookup(
@@ -1247,7 +1254,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
     rows = []
     for eid in sorted(emp_to_name.keys()):
         name = emp_to_name[eid]
-        has_schedule = bool(name) and name in scheduled_names
+        has_schedule = bool(name) and has_schedule_by_name.get(name, False)
         is_excluded = eid in excluded_ids
         emp_timeoff = timeoff_by_id.get(eid, {})
         emp_off_days = weekly_off_lookup.get(eid, set(WEEKLY_OFF_DAYS))
@@ -1995,7 +2002,7 @@ _EXCESSIVE_EXCUSE_THRESHOLD = 4
 _ANOMALY_DELAY_THRESHOLD_MIN = 240  # 4+ hours suggests wrong-shift assignment
 
 
-def _build_employee_master(df, schedules_df, daily):
+def _build_employee_master(df, schedules_df, daily, schedule_lookup=None):
     """Per-employee reconciliation + HR audit flags.
 
     One row per Employee ID seen in the attendance file. Columns:
@@ -2006,6 +2013,12 @@ def _build_employee_master(df, schedules_df, daily):
     audit_flags is a comma-separated string drawn from:
       chronic_lateness, repeated_missing_checkouts, excessive_excuses,
       no_assigned_schedule, attendance_anomaly.
+
+    `schedule_lookup` (optional `ScheduleLookup`) drives the
+    Schedule Presence flag and the Odoo Resource label so a match via
+    EMP code or NBSP-normalized name does not show up as orphan. When
+    omitted, a fresh lookup is built from `schedules_df` so callers
+    can rely on the new semantics without thread-through plumbing.
     """
     daily_agg = (
         daily.groupby("Employee ID")
@@ -2030,12 +2043,18 @@ def _build_employee_master(df, schedules_df, daily):
     )
     all_emp["First Name"] = all_emp["First Name"].astype(str).str.strip()
 
-    schedule_names = set(
-        schedules_df["Name"].dropna().astype(str).str.strip()
+    if schedule_lookup is None:
+        label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+        schedule_lookup = ScheduleLookup(schedules_df, label_column=label_col)
+    match_by_name = {
+        name: schedule_lookup.match(name)
+        for name in all_emp["First Name"].unique()
+    }
+    all_emp["Schedule Presence"] = all_emp["First Name"].map(
+        lambda n: bool(match_by_name.get(n, {}).get("intervals"))
     )
-    all_emp["Schedule Presence"] = all_emp["First Name"].isin(schedule_names)
-    all_emp["Odoo Resource"] = all_emp["First Name"].where(
-        all_emp["Schedule Presence"], None
+    all_emp["Odoo Resource"] = all_emp["First Name"].map(
+        lambda n: match_by_name.get(n, {}).get("matched_name") or None
     )
 
     master = all_emp.merge(daily_agg, on="Employee ID", how="left")
@@ -2108,12 +2127,16 @@ def _compute_data_quality_score(
     return round(score, 1)
 
 
-def _build_employee_reconciliation_details(df, schedules_df, daily):
+def _build_employee_reconciliation_details(df, schedules_df, daily,
+                                           schedule_lookup=None):
     """Per-employee reconciliation rows covering every ID in the attendance
     file: Employee ID, First Name, has_schedule, has_checkin, attendance_status_count.
 
     Employees in the attendance file with no Check In get
     attendance_status_count = 0 so they remain visible for audit.
+
+    `has_schedule` honors the same multi-key `ScheduleLookup` semantics
+    used elsewhere (EMP code, NBSP-collapsed name, stripped-EMP name).
     """
     all_emp = (
         df.dropna(subset=["Employee ID"])
@@ -2123,10 +2146,12 @@ def _build_employee_reconciliation_details(df, schedules_df, daily):
     )
     all_emp["First Name"] = all_emp["First Name"].astype(str).str.strip()
 
-    schedule_names = set(
-        schedules_df["Name"].dropna().astype(str).str.strip()
+    if schedule_lookup is None:
+        label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+        schedule_lookup = ScheduleLookup(schedules_df, label_column=label_col)
+    all_emp["has_schedule"] = all_emp["First Name"].map(
+        lambda n: bool(schedule_lookup.match(n)["intervals"])
     )
-    all_emp["has_schedule"] = all_emp["First Name"].isin(schedule_names)
 
     checkin_ids = set(daily["Employee ID"].unique())
     all_emp["has_checkin"] = all_emp["Employee ID"].isin(checkin_ids)
@@ -2357,9 +2382,11 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         df, schedules_df, daily
     )
     reconciliation_details = _build_employee_reconciliation_details(
-        df, schedules_df, daily
+        df, schedules_df, daily, schedule_lookup=schedule_lookup,
     )
-    employee_master = _build_employee_master(df, schedules_df, daily)
+    employee_master = _build_employee_master(
+        df, schedules_df, daily, schedule_lookup=schedule_lookup,
+    )
     top_overtime_employees = _build_top_overtime_employees(daily)
     top_early_leave_employees = _build_top_early_leave_employees(daily)
 
@@ -2386,6 +2413,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         daily, df, schedules_df, time_off_df, excluded_df,
         weekly_off_df=weekly_off_df,
         period_start=period_start, period_end=period_end,
+        schedule_lookup=schedule_lookup,
     )
     absence_audit = _build_absence_audit(absence_details)
     (absence_by_id, permission_by_id,
@@ -2435,9 +2463,16 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
 
     excluded_employees_summary = _build_excluded_employees_summary(daily, excluded_df)
 
-    schedule_names = set(schedules_df["Name"].dropna().astype(str).str.strip())
+    # Orphans honor the same multi-key match used everywhere else;
+    # a NBSP-laced Odoo name no longer makes its punches "orphans".
+    unique_attendance_names = df["First Name"].dropna().astype(str).str.strip().unique()
+    name_has_schedule = {
+        n: bool(schedule_lookup.match(n)["intervals"])
+        for n in unique_attendance_names
+    }
     orphan_attendance_records = int(
-        (~df["First Name"].astype(str).str.strip().isin(schedule_names)).sum()
+        (~df["First Name"].astype(str).str.strip()
+            .map(name_has_schedule).fillna(False)).sum()
     )
     unscheduled_active = int(
         ((employee_master["Attendance Presence"]) & (~employee_master["Schedule Presence"])).sum()

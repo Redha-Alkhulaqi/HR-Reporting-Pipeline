@@ -121,3 +121,12 @@ def test_calculate_metrics_emp420_nbsp_regression():
     assert bool(row["missing_schedule"]) is False
     assert row["shift_start"] == "09:00"
     assert row["shift_end"] == "18:00"
+
+    # Employee Master must NOT flag this employee as orphan, and the
+    # data-quality KPIs that derive from it must reflect zero orphans.
+    em = summary["employee_master"]
+    assert bool(em.iloc[0]["Schedule Presence"]) is True
+    assert em.iloc[0]["Status Consistency"] == "Consistent"
+    assert "no_assigned_schedule" not in em.iloc[0]["audit_flags"]
+    assert summary["unscheduled_active_employees"] == 0
+    assert summary["orphan_attendance_records"] == 0
