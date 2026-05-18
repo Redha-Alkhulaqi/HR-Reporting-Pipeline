@@ -461,6 +461,11 @@ def generate_ai_input_file(metrics, attendance_daily):
             "with a missing Check Out or a missing Working Time cannot "
             "contribute to overtime. Accuracy depends on the Odoo "
             "Working Time labels reflecting each employee's true shift.\n"
+            "\n"
+            "> **Payroll note:** Overtime is currently reported as actual "
+            "overtime duration only. **No 1.5x (or any) payroll "
+            "multiplier is applied by this pipeline.** Any premium-rate "
+            "overtime pay must be applied downstream in payroll.\n"
         )
 
         dept_summary = metrics.get("department_summary")

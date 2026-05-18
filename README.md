@@ -66,6 +66,7 @@ Each step is independently testable (see `tests/`). The flow is orchestrated by 
 ### Time-tracking KPIs
 - **Late grace**: thresholds are checked, then the *full* lateness is counted.
 - **Overtime analytics**: matched-interval-aware overtime detection, anomaly flags, dashboard KPIs, dedicated Overtime sheet, Top Overtime chart.
+  - **Payroll note:** Overtime is currently reported as **actual overtime duration only**. **No 1.5x (or any) payroll multiplier is applied by this pipeline.** Any premium-rate overtime pay must be applied downstream in payroll. See [§14 — Overtime Payroll Multiplier](#14--overtime-payroll-multiplier-future-extension-point) for the safest place to add one later.
 - **Early leave analytics**: matched-interval-aware early-leave detection with anomaly flagging.
 - **Break analytics**: pair-walked Break In / Break Out punches; informational only (never affects KPIs).
 - **Break after-policy calculation**: first 60 minutes of break per day ignored; only the excess counts.
@@ -299,6 +300,39 @@ Files are versioned per month under `outputs/YYYY-MM/`; previous runs are never 
 - 119-test pytest suite covering every business rule.
 
 Full release notes: <https://github.com/Redha-Alkhulaqi/HR-Reporting-Pipeline/releases/tag/v1.0.0>
+
+---
+
+## 14. Overtime Payroll Multiplier (future extension point)
+
+> **Current behavior (v1.0.0):** Overtime is reported as **actual duration only**. There is no `1.5x` (or any) payroll multiplier anywhere in the calculation, export, or report layers.
+
+If a premium-rate overtime payroll calculation is needed in the future, the safest place to add it is a **derived field at aggregation time** — not inside the per-row classifier. Specifically:
+
+1. Add a config constant in [src/config.py](src/config.py):
+   ```python
+   OVERTIME_PAY_MULTIPLIER = float(os.getenv("OVERTIME_PAY_MULTIPLIER", "1.0"))
+   ```
+   Default `1.0` is a no-op so existing reports stay byte-identical until the multiplier is consciously raised.
+
+2. Compute a new **derived** field (do **not** mutate `overtime_minutes`) where overtime totals are aggregated in [src/metrics_calculator.py](src/metrics_calculator.py):
+   ```python
+   total_overtime_pay_hours = round(
+       (total_overtime_minutes / 60) * OVERTIME_PAY_MULTIPLIER, 1
+   )
+   ```
+   Surface it in the summary dict alongside `total_overtime_hours`.
+
+3. Add the new column to the Overtime / Employee Summary sheets in [src/excel_exporter.py](src/excel_exporter.py) and to the Claude markdown brief in [src/ai_summary_generator.py](src/ai_summary_generator.py).
+
+**Why this location is safest:**
+
+- `overtime_minutes` stays the source-of-truth physical duration. Every audit, sheet, and existing test continues to work.
+- The multiplier is one configurable constant — easy to change per-tenant, easy to revert, easy to test.
+- The new field has a separate name (`overtime_pay_hours` or similar) so HR can see *both* the worked hours and the payable hours side-by-side.
+- A future per-employee policy override (analogous to the existing [overtime_policy_overrides.xlsx](data/) file) could ship a per-row `overtime_pay_multiplier` column for employees with unusual rates.
+
+**Do NOT** apply the multiplier inside `_classify_overtime_row` or `_classify_total_span_minus` — those compute physical durations and are consumed by many downstream calculations (early leave, anomaly flags, executive summary, Claude brief). Mixing pay-rate math into the duration would silently inflate every dependent KPI.
 
 ---
 
