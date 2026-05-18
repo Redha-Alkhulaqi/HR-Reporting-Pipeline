@@ -116,6 +116,11 @@ from config import (
 # approved time-off row is treated as LEAVE (full-day, supersedes attendance).
 _EXCUSE_KEYWORDS = ("استأذان", "استئذان", "excuse", "permission")
 
+# Time Off Type values containing any of these substrings (case-insensitive)
+# are treated as SECONDMENT. Everything else that is not an excuse falls
+# under VACATION (Annual / Sick / unpaid / etc.).
+_SECONDMENT_KEYWORDS = ("secondment", "انتداب", "ندب", "intidab")
+
 # Source columns that we accept as the employee's department / org unit.
 _DEPARTMENT_COL_CANDIDATES = (
     "Department", "Department Name", "Work Location", "Company",
@@ -179,6 +184,13 @@ def _is_excuse_type(type_name):
         return False
     text = str(type_name).lower()
     return any(kw.lower() in text for kw in _EXCUSE_KEYWORDS)
+
+
+def _is_secondment_type(type_name):
+    if type_name is None:
+        return False
+    text = str(type_name).lower()
+    return any(kw.lower() in text for kw in _SECONDMENT_KEYWORDS)
 
 
 _TRUTHY_STRINGS = {"true", "yes", "y", "1", "نعم"}
@@ -752,83 +764,151 @@ def _attach_break_info(daily, df):
     return daily
 
 
-def _build_leave_date_lookup(daily, time_off_df):
-    """Return dict {Employee ID: set of YYYY-MM-DD strings} covered by
-    every type of approved time off (Annual, Sick, استأذان, etc.)."""
-    if time_off_df is None or time_off_df.empty:
-        return {}
-    name_to_id = {}
-    for eid, name in daily.groupby("Employee ID")["First Name"].first().items():
-        if pd.notna(name):
-            name_to_id[str(name).strip()] = eid
-
-    approved = time_off_df[time_off_df["Status"] == "Approved"].copy()
-    approved["Employee"] = approved["Employee"].astype(str).str.strip()
-    approved["Start Date"] = pd.to_datetime(approved["Start Date"], errors="coerce")
-    approved["End Date"] = pd.to_datetime(approved["End Date"], errors="coerce")
-    approved = approved.dropna(subset=["Start Date", "End Date"])
-
-    by_id = {}
-    for _, row in approved.iterrows():
-        eid = name_to_id.get(row["Employee"])
-        if eid is None:
-            continue
-        for d in pd.date_range(
-            row["Start Date"].normalize(),
-            row["End Date"].normalize(),
-            freq="D",
-        ):
-            by_id.setdefault(eid, set()).add(d.strftime("%Y-%m-%d"))
-    return by_id
-
-
 _ABSENCE_DETAILS_COLS = [
     "Employee ID", "First Name", "Date", "Weekday",
     "Is Scheduled Working Day", "Has Attendance",
-    "Has Approved Time Off", "Is Weekly Off", "Is Holiday",
-    "Counted As Absence", "Absence Reason",
+    "Time Off Type", "Is Permission", "Is Vacation",
+    "Is Secondment", "Is Weekly Off", "Is Holiday",
+    "Is Excluded", "Counted As Absence", "Absence Reason",
 ]
 
 
-def _build_absence_details(daily, schedules_df, time_off_df):
+def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
+                            period_start=None, period_end=None):
     """Return one row per (employee, date) explaining why a day was or
     was not counted as an absence.
 
-    A day is counted as absence iff ALL of:
-      - the employee has a shift assigned in Odoo (otherwise we cannot
-        decide expected days),
-      - the weekday is NOT in WEEKLY_OFF_DAYS,
-      - the date is NOT in PUBLIC_HOLIDAYS,
-      - the employee has no Check In that day,
-      - and the employee has no approved time off covering that day.
+    The reporting period is the contiguous calendar from `period_start`
+    to `period_end`. When either bound is omitted it is inferred from
+    the min/max Date in `df`, but callers should pass explicit bounds
+    whenever they know the intended reporting window so stray
+    out-of-window dates (e.g. mis-entered manual corrections) do not
+    inflate the absence count. Crucially the calendar includes dates
+    where NO employee punched, so zero-attendance days are still
+    considered. The employee universe is every unique Employee ID that
+    appears anywhere in `df` (Check In, Check Out, breaks alike),
+    which catches employees who only have non-Check-In punches.
 
-    The reporting-period dates are the union of every Date in `daily`.
+    A day is counted as absence iff ALL of:
+      - employee has a shift assigned in Odoo (otherwise we cannot
+        decide expected days),
+      - weekday is NOT in WEEKLY_OFF_DAYS,
+      - date is NOT in PUBLIC_HOLIDAYS,
+      - employee has no Check In that day,
+      - employee has no approved time off (permission, vacation/sick,
+        secondment) covering that day,
+      - employee is not on the exclusion list.
+
+    Time off rows are categorized into Permission (excuse type),
+    Secondment (secondment keywords), or Vacation (every other
+    approved type, e.g. Annual Leave / Sick Leave).
     """
-    if daily.empty:
+    if df is None or df.empty:
         return pd.DataFrame(columns=_ABSENCE_DETAILS_COLS)
 
-    period_dates = sorted(daily["Date"].astype(str).unique())
-    emp_dates = (
-        daily.groupby("Employee ID")["Date"]
-        .apply(lambda s: set(s.astype(str)))
-        .to_dict()
+    # Contiguous reporting-period calendar. Bounds come from the
+    # caller when known; otherwise fall back to df's min/max Date.
+    parsed_dates = pd.to_datetime(df["Date"], errors="coerce").dropna()
+    if parsed_dates.empty and (period_start is None or period_end is None):
+        return pd.DataFrame(columns=_ABSENCE_DETAILS_COLS)
+    if period_start is None:
+        period_start = parsed_dates.min()
+    if period_end is None:
+        period_end = parsed_dates.max()
+    period_start = pd.to_datetime(period_start).normalize()
+    period_end = pd.to_datetime(period_end).normalize()
+    if period_end < period_start:
+        return pd.DataFrame(columns=_ABSENCE_DETAILS_COLS)
+    period_dates = [
+        d.strftime("%Y-%m-%d")
+        for d in pd.date_range(period_start, period_end, freq="D")
+    ]
+
+    # Employee universe: every Employee ID seen anywhere in df.
+    emp_to_name = {}
+    df_clean = df[df["Employee ID"].notna()].copy()
+    df_clean["First Name"] = df_clean["First Name"].astype(str).str.strip()
+    for eid, sub in df_clean.groupby("Employee ID"):
+        non_empty = sub["First Name"][sub["First Name"].astype(bool)]
+        emp_to_name[eid] = non_empty.iloc[0] if not non_empty.empty else ""
+
+    # Cross-reference Check Ins -- only Check Ins count as attendance.
+    check_ins = df_clean[df_clean["Punch State"] == "Check In"]
+    attendance_set = set()
+    if not check_ins.empty:
+        for eid, date in check_ins[["Employee ID", "Date"]].itertuples(
+            index=False
+        ):
+            attendance_set.add((eid, str(date)))
+
+    # Approved time off -> (Employee ID, Date) -> (category, type_name).
+    name_to_ids = {}
+    for eid, name in emp_to_name.items():
+        if name:
+            name_to_ids.setdefault(name, []).append(eid)
+
+    timeoff_by_id = {}
+    if time_off_df is not None and not time_off_df.empty:
+        approved = time_off_df[time_off_df["Status"] == "Approved"].copy()
+        approved["Employee"] = approved["Employee"].astype(str).str.strip()
+        approved["Start Date"] = pd.to_datetime(
+            approved["Start Date"], errors="coerce"
+        )
+        approved["End Date"] = pd.to_datetime(
+            approved["End Date"], errors="coerce"
+        )
+        approved = approved.dropna(subset=["Start Date", "End Date"])
+        for _, row in approved.iterrows():
+            ids = name_to_ids.get(row["Employee"], [])
+            if not ids:
+                continue
+            type_name = row["Time Off Type"]
+            if _is_secondment_type(type_name):
+                category = "secondment"
+            elif _is_excuse_type(type_name):
+                category = "permission"
+            else:
+                category = "vacation"
+            for d in pd.date_range(
+                row["Start Date"].normalize(),
+                row["End Date"].normalize(),
+                freq="D",
+            ):
+                ds = d.strftime("%Y-%m-%d")
+                for eid in ids:
+                    # Don't overwrite a stronger category (vacation +
+                    # secondment overlap is extremely rare; first wins).
+                    timeoff_by_id.setdefault(eid, {}).setdefault(
+                        ds, (category, type_name)
+                    )
+
+    # Exclusions: resolve once per Employee ID.
+    exclusion_rules = (
+        _build_exclusion_rules(excluded_df)
+        if excluded_df is not None else []
     )
-    emp_names = daily.groupby("Employee ID")["First Name"].first().to_dict()
+    excluded_ids = set()
+    if exclusion_rules:
+        for eid, name in emp_to_name.items():
+            rule = _match_exclusion(
+                eid, name, exclusion_rules,
+                ALLOW_NAME_BASED_EXCLUSION_MATCH,
+            )
+            if rule is not None and any(rule["flags"].values()):
+                excluded_ids.add(eid)
+
     scheduled_names = set(
         schedules_df["Name"].dropna().astype(str).str.strip()
     )
-    leave_by_id = _build_leave_date_lookup(daily, time_off_df)
-
     weekly_off_set = set(WEEKLY_OFF_DAYS)
     holiday_set = set(PUBLIC_HOLIDAYS)
 
     rows = []
-    for eid in sorted(emp_dates.keys()):
-        raw_name = emp_names.get(eid)
-        clean_name = str(raw_name).strip() if pd.notna(raw_name) else ""
-        has_schedule = clean_name in scheduled_names
-        present = emp_dates[eid]
-        leaves = leave_by_id.get(eid, set())
+    for eid in sorted(emp_to_name.keys()):
+        name = emp_to_name[eid]
+        has_schedule = bool(name) and name in scheduled_names
+        is_excluded = eid in excluded_ids
+        emp_timeoff = timeoff_by_id.get(eid, {})
         for date_str in period_dates:
             weekday = pd.to_datetime(date_str).strftime("%A")
             is_weekly_off = weekday in weekly_off_set
@@ -836,125 +916,145 @@ def _build_absence_details(daily, schedules_df, time_off_df):
             is_scheduled = (
                 has_schedule and not is_weekly_off and not is_holiday
             )
-            has_att = date_str in present
-            has_off = date_str in leaves
-            counted = is_scheduled and not has_att and not has_off
+            has_att = (eid, date_str) in attendance_set
+            tof = emp_timeoff.get(date_str)
+            type_name = tof[1] if tof else None
+            is_permission = tof is not None and tof[0] == "permission"
+            is_vacation = tof is not None and tof[0] == "vacation"
+            is_secondment = tof is not None and tof[0] == "secondment"
+            has_off = tof is not None
+            counted = (
+                is_scheduled
+                and not has_att
+                and not has_off
+                and not is_excluded
+            )
 
             if counted:
                 reason = "Absent (no attendance and no approved time off)"
+            elif is_excluded:
+                reason = "Excluded employee"
             elif is_holiday:
                 reason = "Public holiday"
             elif is_weekly_off:
                 reason = f"Weekly off ({weekday})"
             elif not has_schedule:
                 reason = "Employee has no Odoo schedule"
+            elif has_att and has_off:
+                reason = f"Attended with approved time off ({type_name})"
             elif has_att:
                 reason = "Present (has attendance)"
             elif has_off:
-                reason = "Approved time off"
+                reason = f"Approved time off ({type_name})"
             else:
                 reason = ""
 
             rows.append({
                 "Employee ID": eid,
-                "First Name": raw_name,
+                "First Name": name,
                 "Date": date_str,
                 "Weekday": weekday,
                 "Is Scheduled Working Day": is_scheduled,
                 "Has Attendance": has_att,
-                "Has Approved Time Off": has_off,
+                "Time Off Type": type_name,
+                "Is Permission": is_permission,
+                "Is Vacation": is_vacation,
+                "Is Secondment": is_secondment,
                 "Is Weekly Off": is_weekly_off,
                 "Is Holiday": is_holiday,
+                "Is Excluded": is_excluded,
                 "Counted As Absence": counted,
                 "Absence Reason": reason,
             })
     return pd.DataFrame(rows, columns=_ABSENCE_DETAILS_COLS)
 
 
-def _absence_counts_from_details(absence_details):
-    """Return dict {Employee ID: absence_day_count}."""
-    if absence_details.empty:
-        return {}
-    return (
-        absence_details[absence_details["Counted As Absence"]]
-        .groupby("Employee ID")
-        .size()
-        .to_dict()
-    )
+_ABSENCE_AUDIT_COLS = [
+    "Employee ID", "First Name",
+    "scheduled_working_days", "attended_days",
+    "permission_days", "vacation_days", "secondment_days",
+    "absence_days", "reconciliation_delta",
+]
 
 
-# Time Off Type values containing any of these substrings (case-insensitive)
-# are treated as SECONDMENT. Everything else that is not an excuse falls
-# under VACATION (Annual / Sick / unpaid / etc.).
-_SECONDMENT_KEYWORDS = ("secondment", "انتداب", "ندب", "intidab")
+def _build_absence_audit(absence_details):
+    """Per-employee audit totals derived from Absence Details.
 
+    For each non-excluded employee:
+      scheduled_working_days =
+          attended_days + permission_days + vacation_days
+        + secondment_days + absence_days
 
-def _is_secondment_type(type_name):
-    if type_name is None:
-        return False
-    text = str(type_name).lower()
-    return any(kw.lower() in text for kw in _SECONDMENT_KEYWORDS)
-
-
-def _build_timeoff_day_counts_by_category(daily, time_off_df):
-    """Return (permission_by_id, vacation_by_id, secondment_by_id).
-
-    Each dict maps Employee ID -> integer count of distinct reporting-
-    period dates where the employee held approved time off of that
-    category. Categories are mutually exclusive at the (row, day) level:
-
-      Secondment : Time Off Type contains a secondment keyword.
-      Permission : Time Off Type is an excuse (partial hourly permission).
-      Vacation   : every other approved time-off row (Annual / Sick / ...).
-
-    Only dates that appear in the reporting period (the union of dates
-    in `daily`) are counted so the figures match what the rest of the
-    report covers.
+    The five RHS buckets are mutually exclusive over each scheduled
+    working day (priority: attended > permission > vacation >
+    secondment > absence) so a non-zero `reconciliation_delta` flags a
+    bookkeeping inconsistency for HR to investigate.
     """
-    empty = ({}, {}, {})
-    if daily.empty or time_off_df is None or time_off_df.empty:
+    if absence_details is None or absence_details.empty:
+        return pd.DataFrame(columns=_ABSENCE_AUDIT_COLS)
+
+    df = absence_details[~absence_details["Is Excluded"]].copy()
+    if df.empty:
+        return pd.DataFrame(columns=_ABSENCE_AUDIT_COLS)
+
+    working = df["Is Scheduled Working Day"]
+    df["_sched"] = working
+    df["_attended"] = working & df["Has Attendance"]
+    df["_permission"] = (
+        working & ~df["Has Attendance"] & df["Is Permission"]
+    )
+    df["_vacation"] = (
+        working & ~df["Has Attendance"] & df["Is Vacation"] & ~df["Is Permission"]
+    )
+    df["_secondment"] = (
+        working & ~df["Has Attendance"] & df["Is Secondment"]
+        & ~df["Is Permission"] & ~df["Is Vacation"]
+    )
+    df["_absence"] = df["Counted As Absence"]
+
+    grp = (
+        df.groupby(["Employee ID", "First Name"], as_index=False)
+        .agg(
+            scheduled_working_days=("_sched", "sum"),
+            attended_days=("_attended", "sum"),
+            permission_days=("_permission", "sum"),
+            vacation_days=("_vacation", "sum"),
+            secondment_days=("_secondment", "sum"),
+            absence_days=("_absence", "sum"),
+        )
+    )
+    int_cols = [
+        "scheduled_working_days", "attended_days",
+        "permission_days", "vacation_days",
+        "secondment_days", "absence_days",
+    ]
+    for col in int_cols:
+        grp[col] = grp[col].astype(int)
+    grp["reconciliation_delta"] = (
+        grp["scheduled_working_days"]
+        - (grp["attended_days"] + grp["permission_days"]
+           + grp["vacation_days"] + grp["secondment_days"]
+           + grp["absence_days"])
+    )
+    return grp[_ABSENCE_AUDIT_COLS].sort_values(
+        by=["reconciliation_delta", "absence_days", "First Name"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+
+
+def _category_counts_from_audit(absence_audit):
+    """Return (absence, permission, vacation, secondment) dicts keyed
+    by Employee ID, derived from the audit table. The audit is the
+    single source of truth for these four counts so they stay
+    internally consistent with the reconciliation balance."""
+    empty = ({}, {}, {}, {})
+    if absence_audit is None or absence_audit.empty:
         return empty
-
-    period_dates = set(daily["Date"].astype(str).unique())
-    name_to_id = {}
-    for eid, name in daily.groupby("Employee ID")["First Name"].first().items():
-        if pd.notna(name):
-            name_to_id[str(name).strip()] = eid
-
-    approved = time_off_df[time_off_df["Status"] == "Approved"].copy()
-    if approved.empty:
-        return empty
-    approved["Employee"] = approved["Employee"].astype(str).str.strip()
-    approved["Start Date"] = pd.to_datetime(approved["Start Date"], errors="coerce")
-    approved["End Date"] = pd.to_datetime(approved["End Date"], errors="coerce")
-    approved = approved.dropna(subset=["Start Date", "End Date"])
-
-    permission, vacation, secondment = {}, {}, {}
-
-    for _, row in approved.iterrows():
-        eid = name_to_id.get(row["Employee"])
-        if eid is None:
-            continue
-        type_name = row["Time Off Type"]
-        if _is_secondment_type(type_name):
-            bucket = secondment
-        elif _is_excuse_type(type_name):
-            bucket = permission
-        else:
-            bucket = vacation
-        for d in pd.date_range(
-            row["Start Date"].normalize(),
-            row["End Date"].normalize(),
-            freq="D",
-        ):
-            ds = d.strftime("%Y-%m-%d")
-            if ds in period_dates:
-                bucket.setdefault(eid, set()).add(ds)
-
     return (
-        {k: len(v) for k, v in permission.items()},
-        {k: len(v) for k, v in vacation.items()},
-        {k: len(v) for k, v in secondment.items()},
+        dict(zip(absence_audit["Employee ID"], absence_audit["absence_days"])),
+        dict(zip(absence_audit["Employee ID"], absence_audit["permission_days"])),
+        dict(zip(absence_audit["Employee ID"], absence_audit["vacation_days"])),
+        dict(zip(absence_audit["Employee ID"], absence_audit["secondment_days"])),
     )
 
 
@@ -1761,7 +1861,7 @@ def filter_inputs_for_report(df, schedules_df, time_off_df, excluded_df):
 
 
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
-                      alias_audit=None):
+                      alias_audit=None, period_start=None, period_end=None):
     # Build the source-of-truth intervals lookup ONCE; derive the
     # single-time lookups from it so all three views stay consistent
     # even when shifts are split.
@@ -1815,18 +1915,37 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     )
 
     # Absence audit: per-(employee, date) ledger that respects weekly
-    # off days, holidays, attendance, and approved time off. The
-    # executive summary's absence count is derived from this so the
-    # number can always be traced to the audit sheet.
-    absence_details = _build_absence_details(daily, schedules_df, time_off_df)
-    absence_by_id = _absence_counts_from_details(absence_details)
+    # off days, holidays, attendance, and approved time off. Built from
+    # `df` (not `daily`) so the reporting calendar covers EVERY date in
+    # the period -- including days where no one punched -- and the
+    # employee universe includes IDs that only have non-Check-In
+    # punches. The executive summary's day counts derive from this
+    # ledger so the headline numbers always trace back to the audit.
+    absence_details = _build_absence_details(
+        daily, df, schedules_df, time_off_df, excluded_df,
+        period_start=period_start, period_end=period_end,
+    )
+    absence_audit = _build_absence_audit(absence_details)
+    (absence_by_id, permission_by_id,
+     vacation_by_id, secondment_by_id) = _category_counts_from_audit(absence_audit)
+
+    # Surface reconciliation breaks to the validation log so HR can
+    # spot bookkeeping inconsistencies before publishing the report.
+    audit_breaks = []
+    if not absence_audit.empty:
+        broken = absence_audit[absence_audit["reconciliation_delta"] != 0]
+        for _, r in broken.iterrows():
+            audit_breaks.append(
+                f"Employee {r['Employee ID']} ({r['First Name']}): "
+                f"scheduled={r['scheduled_working_days']} but "
+                f"attended+permission+vacation+secondment+absence="
+                f"{r['scheduled_working_days'] - r['reconciliation_delta']} "
+                f"(delta={r['reconciliation_delta']})"
+            )
 
     # Executive view of the Employee Summary sheet (11 named columns,
     # hours-based, independent grace thresholds). Lives alongside the
     # internal employee_summary so the Markdown / charts keep working.
-    permission_by_id, vacation_by_id, secondment_by_id = (
-        _build_timeoff_day_counts_by_category(daily, time_off_df)
-    )
     executive_employee_summary = _build_executive_employee_summary(
         daily, absence_by_id,
         permission_by_id, vacation_by_id, secondment_by_id,
@@ -1944,6 +2063,8 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         "break_summary": break_summary,
         "executive_employee_summary": executive_employee_summary,
         "absence_details": absence_details,
+        "absence_audit": absence_audit,
+        "absence_audit_breaks": audit_breaks,
         "excluded_employees_summary": excluded_employees_summary,
         "alias_audit": (
             alias_audit if alias_audit is not None else pd.DataFrame()

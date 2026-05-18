@@ -265,7 +265,10 @@ def test_permission_vacation_and_secondment_day_counts():
     zain = exec_df[exec_df["Employee ID"] == 2].iloc[0]
     assert zain["No of Permission Days"] == 0
     assert zain["No of Vacation Days"] == 0
-    assert zain["No of Secondment Days"] == 3
+    # ZAIN's secondment spans 2026-05-01..2026-05-03. 2026-05-01 is
+    # Friday (weekly off), so only the two scheduled working days
+    # (Sat 05-02, Sun 05-03) count toward Secondment Days.
+    assert zain["No of Secondment Days"] == 2
 
 
 def test_excluded_employees_are_dropped_from_executive_summary():
@@ -293,3 +296,103 @@ def test_excluded_employees_are_dropped_from_executive_summary():
     exec_df = summary["executive_employee_summary"]
     assert 2 not in exec_df["Employee ID"].tolist()
     assert 1 in exec_df["Employee ID"].tolist()
+
+
+ABSENCE_DETAILS_COLUMNS = [
+    "Employee ID", "First Name", "Date", "Weekday",
+    "Is Scheduled Working Day", "Has Attendance",
+    "Time Off Type", "Is Permission", "Is Vacation",
+    "Is Secondment", "Is Weekly Off", "Is Holiday",
+    "Is Excluded", "Counted As Absence", "Absence Reason",
+]
+
+
+def test_absence_details_has_required_schema():
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-02", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "17:00:00", "Check Out"),
+    ])
+    summary, _ = calculate_metrics(df, _schedules())
+    details = summary["absence_details"]
+    assert list(details.columns) == ABSENCE_DETAILS_COLUMNS
+
+
+def test_absence_uses_full_calendar_not_just_punched_dates():
+    """An employee who never punches on a particular date inside the
+    period must still be considered for absence on that date -- the
+    old logic only walked dates that had at least one punch."""
+    df = pd.DataFrame([
+        # ALI punches only at the period bounds. The interior dates
+        # (Sun 05-03 and Mon 05-04) are working days that ALI missed.
+        _punch(1, "ALI-EMP1", "2026-05-02", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "17:00:00", "Check Out"),
+        _punch(1, "ALI-EMP1", "2026-05-05", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-05", "17:00:00", "Check Out"),
+    ])
+    schedules = pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+    summary, _ = calculate_metrics(df, schedules)
+    ali = summary["executive_employee_summary"].iloc[0]
+    # 2026-05-03 (Sun) and 2026-05-04 (Mon) are scheduled working days
+    # with no attendance and no time off -> 2 absences.
+    assert ali["No of Absence Days"] == 2
+    details = summary["absence_details"]
+    interior = details[
+        (details["Employee ID"] == 1)
+        & details["Date"].isin(["2026-05-03", "2026-05-04"])
+    ]
+    assert (interior["Counted As Absence"] == True).all()  # noqa: E712
+
+
+def test_absence_audit_balance_equation():
+    """For every non-excluded employee:
+       scheduled_working_days = attended + permission + vacation
+                              + secondment + absence
+    """
+    df = pd.DataFrame([
+        # Sat 05-02 attended, Sun 05-03 absent, Mon 05-04 permission,
+        # Tue 05-05 vacation, Wed 05-06 secondment.
+        _punch(1, "ALI-EMP1", "2026-05-02", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "17:00:00", "Check Out"),
+        _punch(2, "ZAIN-EMP2", "2026-05-02", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-03", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-04", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-05", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-06", "08:00:00", "Check In"),
+    ])
+    schedules = pd.DataFrame([
+        {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+        {"Name": "ZAIN-EMP2", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
+    ])
+    time_off = pd.DataFrame([
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-04 09:00:00",
+         "End Date": "2026-05-04 10:00:00",
+         "Time Off Type": "استأذان"},
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-05 00:00:00",
+         "End Date": "2026-05-05 23:59:00",
+         "Time Off Type": "Annual Leave"},
+        {"Employee": "ALI-EMP1", "Status": "Approved",
+         "Start Date": "2026-05-06 00:00:00",
+         "End Date": "2026-05-06 23:59:00",
+         "Time Off Type": "Secondment"},
+    ])
+    summary, _ = calculate_metrics(df, schedules, time_off)
+    audit = summary["absence_audit"]
+    assert not audit.empty
+
+    # Every per-employee row balances.
+    assert (audit["reconciliation_delta"] == 0).all()
+
+    ali = audit[audit["Employee ID"] == 1].iloc[0]
+    # Period 2026-05-02..2026-05-06: Sat,Sun,Mon,Tue,Wed = 5 working days.
+    assert ali["scheduled_working_days"] == 5
+    assert ali["attended_days"] == 1       # 05-02
+    assert ali["absence_days"] == 1        # 05-03
+    assert ali["permission_days"] == 1     # 05-04
+    assert ali["vacation_days"] == 1       # 05-05
+    assert ali["secondment_days"] == 1     # 05-06
+    # No warnings emitted because every employee balances.
+    assert summary["absence_audit_breaks"] == []

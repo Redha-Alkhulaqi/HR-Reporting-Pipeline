@@ -581,6 +581,15 @@ def export_report(summary, daily):
             wb.create_sheet("Absence Details"), absence_details
         )
 
+    # Per-employee audit totals (scheduled / attended / permission /
+    # vacation / secondment / absence) with a reconciliation_delta so
+    # HR can spot bookkeeping inconsistencies at a glance.
+    absence_audit = summary.get("absence_audit")
+    if absence_audit is not None and not absence_audit.empty:
+        _build_data_sheet(
+            wb.create_sheet("Absence Audit"), absence_audit
+        )
+
     # Employee ID alias audit -- which historical IDs got remapped to
     # current IDs (only when at least one alias was configured active).
     alias_audit = summary.get("alias_audit")

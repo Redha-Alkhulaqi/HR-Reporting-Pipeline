@@ -121,6 +121,19 @@ def main(argv=None):
     try:
         df = load_attendance_file(PROJECT_ROOT / "data/attendance_raw.xlsx")
 
+        # Capture the attendance file's native date range BEFORE any
+        # transformation. This is the authoritative reporting period
+        # when the user does not pass --from/--to: it ignores stray
+        # dates that manual punch corrections may inject (e.g. an HR
+        # form filled in with a typo year/month).
+        raw_dates = pd.to_datetime(df["Date"], errors="coerce").dropna()
+        inferred_period_start = (
+            raw_dates.min().normalize() if not raw_dates.empty else None
+        )
+        inferred_period_end = (
+            raw_dates.max().normalize() if not raw_dates.empty else None
+        )
+
         # Apply temporary manual (camera-verified) forgotten-punch
         # corrections BEFORE alias remapping so any historical IDs in
         # the HR form get unified by the alias step alongside biometric
@@ -194,6 +207,24 @@ def main(argv=None):
                 f"{before} -> {len(df)} attendance rows"
             )
 
+        # Authoritative reporting period: CLI bounds win over the
+        # inferred attendance-file range. Used by the absence calendar
+        # so out-of-window manual corrections cannot inflate absences.
+        period_start = (
+            pd.to_datetime(args.from_date).normalize()
+            if args.from_date else inferred_period_start
+        )
+        period_end = (
+            pd.to_datetime(args.to_date).normalize()
+            if args.to_date else inferred_period_end
+        )
+        logger.info(
+            f"Reporting period: "
+            f"{period_start.strftime('%Y-%m-%d') if period_start is not None else '-'}"
+            f" .. "
+            f"{period_end.strftime('%Y-%m-%d') if period_end is not None else '-'}"
+        )
+
         _log_validation(validate_attendance(df))
         _log_validation(validate_schedules(schedules_df))
         _log_validation(validate_time_off(time_off_df))
@@ -201,6 +232,7 @@ def main(argv=None):
         summary, daily = calculate_metrics(
             df, schedules_df, time_off_df,
             excluded_df=excluded_df, alias_audit=alias_audit,
+            period_start=period_start, period_end=period_end,
         )
         logger.info(
             f"Metrics computed: daily_rows={len(daily)} "
@@ -213,6 +245,8 @@ def main(argv=None):
             f"excluded={summary.get('excluded_employee_count', 0)} "
             f"data_quality_score={summary.get('data_quality_score', 'n/a')}"
         )
+        for warn in summary.get("absence_audit_breaks", []):
+            logger.warning(f"Absence audit reconciliation break: {warn}")
 
         # Build the REPORT view -- by default we hide excluded employees
         # from every exported sheet and from the Claude markdown. The
@@ -226,6 +260,7 @@ def main(argv=None):
                 report_summary, report_daily = calculate_metrics(
                     r_df, r_sched, r_tof,
                     excluded_df=None, alias_audit=alias_audit,
+                    period_start=period_start, period_end=period_end,
                 )
             logger.info(f"Excluded employees hidden from report: {hidden}")
 
