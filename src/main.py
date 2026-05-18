@@ -30,6 +30,7 @@ from data_loader import (
     load_employee_id_aliases_file,
     load_employee_weekly_off_file,
     load_excluded_employees_file,
+    load_overtime_policy_overrides_file,
     load_time_off_file,
     load_working_schedule_file,
 )
@@ -182,11 +183,15 @@ def main(argv=None):
         weekly_off_df = load_employee_weekly_off_file(
             PROJECT_ROOT / "data/employee_weekly_off.xlsx"
         )
+        overtime_policy_overrides_df = load_overtime_policy_overrides_file(
+            PROJECT_ROOT / "data/overtime_policy_overrides.xlsx"
+        )
         logger.info(
             f"Input files loaded: attendance={len(df)} schedules={len(schedules_df)} "
             f"time_off={len(time_off_df) if time_off_df is not None else 0} "
             f"exclusions={len(excluded_df)} aliases={len(aliases_df)} "
-            f"weekly_off_overrides={len(weekly_off_df)}"
+            f"weekly_off_overrides={len(weekly_off_df)} "
+            f"overtime_policy_overrides={len(overtime_policy_overrides_df)}"
         )
 
         # Apply alias mapping IMMEDIATELY after loading so every
@@ -239,7 +244,16 @@ def main(argv=None):
             excluded_df=excluded_df, alias_audit=alias_audit,
             period_start=period_start, period_end=period_end,
             weekly_off_df=weekly_off_df,
+            overtime_policy_overrides_df=overtime_policy_overrides_df,
         )
+        for w in summary.get("overtime_policy_override_warnings", []):
+            logger.warning(f"Overtime policy overrides: {w}")
+        ot_override_n = summary.get("overtime_policy_override_count", 0)
+        if ot_override_n:
+            logger.info(
+                f"Overtime policy overrides active for "
+                f"{ot_override_n} employee(s)."
+            )
         logger.info(
             f"Metrics computed: daily_rows={len(daily)} "
             f"late={summary['late_cases']} "
@@ -268,6 +282,7 @@ def main(argv=None):
                     excluded_df=None, alias_audit=alias_audit,
                     period_start=period_start, period_end=period_end,
                     weekly_off_df=weekly_off_df,
+                    overtime_policy_overrides_df=overtime_policy_overrides_df,
                 )
             logger.info(f"Excluded employees hidden from report: {hidden}")
 

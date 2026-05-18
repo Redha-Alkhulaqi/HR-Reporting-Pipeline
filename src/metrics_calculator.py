@@ -702,10 +702,132 @@ _OVERTIME_RESULT_COLS = [
     "overtime_minutes", "overtime_status",
     "early_leave_minutes", "early_leave_status",
     "early_leave_anomaly", "early_leave_anomaly_reason",
+    "overtime_policy", "overtime_calculation_note",
 ]
 
 
-def _empty_overtime_result(status):
+# Policy registry. Keep this list explicit so a typo in the override
+# file is rejected as a warning rather than silently treated as
+# "standard". New policies add a new constant here AND a branch in
+# `_classify_overtime_row`.
+OVERTIME_POLICY_STANDARD = "STANDARD"
+OVERTIME_POLICY_TOTAL_SPAN_MINUS_8H = "TOTAL_SPAN_MINUS_8H"
+_SUPPORTED_OVERTIME_POLICIES = {
+    OVERTIME_POLICY_TOTAL_SPAN_MINUS_8H,
+}
+
+
+def _parse_standard_hours_to_minutes(value, default_minutes=480):
+    """Convert a Standard Hours cell value to a number of minutes.
+
+    Accepts "08:00", "8:00", "8", "8.5", 8, 8.5. Returns
+    `default_minutes` when the value is blank / unparseable.
+    """
+    if value is None:
+        return default_minutes
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return default_minutes
+        return int(round(float(value) * 60))
+    text = str(value).strip()
+    if not text:
+        return default_minutes
+    if ":" in text:
+        parts = text.split(":")
+        try:
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+            return h * 60 + m
+        except ValueError:
+            return default_minutes
+    try:
+        return int(round(float(text) * 60))
+    except ValueError:
+        return default_minutes
+
+
+def build_overtime_policy_overrides(overrides_df):
+    """Parse the overrides DataFrame into a dict keyed by Employee ID.
+
+    Returns
+        ({employee_id: {"type": str, "standard_minutes": int,
+                        "note": str, "name": str, "notes": str}},
+         warnings)
+
+    - Rows with `Active = FALSE` are dropped silently.
+    - Rows with an unsupported Policy Type produce a warning string
+      and are dropped.
+    - Duplicate Employee ID -> first row wins; subsequent duplicates
+      become warnings (matches the alias-mapping precedent).
+    - `note` is the human-readable explanation that lands on every
+      affected daily row (`overtime_calculation_note`). It mentions
+      the configured standard so HR can see the threshold inline.
+    """
+    out = {}
+    warnings = []
+    if overrides_df is None or overrides_df.empty:
+        return out, warnings
+
+    df = overrides_df.copy()
+    if "Active" in df.columns:
+        df = df[df["Active"].apply(_parse_bool)]
+    if df.empty:
+        return out, warnings
+
+    for _, row in df.iterrows():
+        try:
+            eid = int(row["Employee ID"])
+        except (KeyError, ValueError, TypeError):
+            warnings.append(
+                "Overtime policy row missing or invalid Employee ID; skipped."
+            )
+            continue
+        policy_type = row.get("Policy Type")
+        if policy_type is None or pd.isna(policy_type):
+            warnings.append(
+                f"Employee {eid}: no Policy Type set; skipped."
+            )
+            continue
+        policy_type = str(policy_type).strip().upper()
+        if policy_type not in _SUPPORTED_OVERTIME_POLICIES:
+            warnings.append(
+                f"Employee {eid}: unsupported policy type "
+                f"'{policy_type}'; skipped. Supported: "
+                f"{sorted(_SUPPORTED_OVERTIME_POLICIES)}"
+            )
+            continue
+        if eid in out:
+            warnings.append(
+                f"Employee {eid}: duplicate overtime policy row; "
+                "first row wins."
+            )
+            continue
+        standard_minutes = _parse_standard_hours_to_minutes(
+            row.get("Standard Hours")
+        )
+        if policy_type == OVERTIME_POLICY_TOTAL_SPAN_MINUS_8H:
+            note = (
+                f"OT calculated as total span minus "
+                f"{standard_minutes // 60}h"
+                f"{(standard_minutes % 60):02d}"
+            )
+        else:
+            note = ""
+        out[eid] = {
+            "type": policy_type,
+            "standard_minutes": standard_minutes,
+            "note": note,
+            "name": "" if pd.isna(row.get("Employee Name"))
+                       else str(row.get("Employee Name")),
+            "notes": "" if pd.isna(row.get("Notes"))
+                        else str(row.get("Notes")),
+        }
+    return out, warnings
+
+
+
+
+def _empty_overtime_result(status, policy=OVERTIME_POLICY_STANDARD, note=""):
     """Default values for rows that cannot be classified (missing data)."""
     return {
         "Shift End DateTime": pd.NaT,
@@ -723,6 +845,8 @@ def _empty_overtime_result(status):
         "early_leave_status": status,
         "early_leave_anomaly": False,
         "early_leave_anomaly_reason": "",
+        "overtime_policy": policy,
+        "overtime_calculation_note": note,
     }
 
 
@@ -773,7 +897,52 @@ def _find_matched_interval_idx(check_in_dt, check_out_dt, interval_dts):
     )
 
 
-def _classify_overtime_row(row, intervals_lookup):
+def _classify_total_span_minus(row, policy):
+    """`TOTAL_SPAN_MINUS_8H` policy:
+        overtime = max(0, (last_checkout - first_checkin) - standard).
+
+    Used for selected employees (configured in the overtime policy
+    overrides file) whose actual work pattern is not faithfully
+    captured by the standard matched-interval logic. Caller already
+    confirmed `has_check_out` is True.
+
+    Early-leave is not meaningful under this policy (we deliberately
+    ignore the schedule), so the early-leave fields report a neutral
+    "N/A (policy override)" status with zero minutes.
+    """
+    date_str = row["Date"]
+    check_in_dt = pd.to_datetime(f"{date_str} {row['Check In']}")
+    check_out_dt = pd.to_datetime(f"{date_str} {row['Check Out']}")
+    if check_out_dt < check_in_dt:
+        check_out_dt += pd.Timedelta(days=1)
+
+    worked = int((check_out_dt - check_in_dt).total_seconds() / 60)
+    standard = int(policy.get("standard_minutes", 480))
+    overtime = max(0, worked - standard)
+    ot_status = "Overtime" if overtime > 0 else "No Overtime"
+
+    return {
+        "Shift End DateTime": pd.NaT,
+        "Check Out DateTime": check_out_dt,
+        "worked_minutes": worked,
+        "scheduled_minutes": standard,
+        "matched_scheduled_minutes": standard,
+        "matched_shift_start": None,
+        "matched_shift_end": None,
+        "matched_shift_label": None,
+        "shift_intervals": None,
+        "overtime_minutes": overtime,
+        "overtime_status": ot_status,
+        "early_leave_minutes": 0,
+        "early_leave_status": "N/A (policy override)",
+        "early_leave_anomaly": False,
+        "early_leave_anomaly_reason": "",
+        "overtime_policy": policy["type"],
+        "overtime_calculation_note": policy.get("note", ""),
+    }
+
+
+def _classify_overtime_row(row, intervals_lookup, policy_overrides=None):
     """Per-row overtime AND early-leave computation against the MATCHED
     interval (the one the employee actually worked), not the day's final
     interval. This makes split-shift days reconcile correctly:
@@ -787,9 +956,25 @@ def _classify_overtime_row(row, intervals_lookup):
     Night-shift wrap is honored (Shift End rolls to next day if it
     falls before Shift Start in clock time, same for Check Out vs
     Check In).
+
+    If `policy_overrides` contains a policy for this row's Employee
+    ID, the standard logic is bypassed and the configured policy's
+    classifier runs instead. The policy still respects
+    `Missing Check Out` (we cannot compute span without a checkout).
     """
     if not row["has_check_out"]:
         return _empty_overtime_result("Missing Check Out")
+
+    if policy_overrides:
+        policy = policy_overrides.get(row.get("Employee ID"))
+        if policy is not None:
+            if policy["type"] == OVERTIME_POLICY_TOTAL_SPAN_MINUS_8H:
+                return _classify_total_span_minus(row, policy)
+            # Future policy types branch here. Unknown types should
+            # never reach this point (filtered in
+            # build_overtime_policy_overrides), but fall through to
+            # standard logic defensively.
+
     if row["missing_schedule"]:
         return _empty_overtime_result("Missing Schedule")
 
@@ -867,16 +1052,26 @@ def _classify_overtime_row(row, intervals_lookup):
         "early_leave_status": el_status,
         "early_leave_anomaly": anomaly,
         "early_leave_anomaly_reason": anomaly_reason,
+        "overtime_policy": OVERTIME_POLICY_STANDARD,
+        "overtime_calculation_note": (
+            "Standard matched-interval overtime against shift end"
+        ),
     }
 
 
-def _attach_overtime_info(daily, intervals_lookup):
+def _attach_overtime_info(daily, intervals_lookup, policy_overrides=None):
     """Add per-segment shift-close fields to daily.
 
     `Shift End` is preserved as the LAST interval's end (a stable daily
     label). The per-row matched_shift_* / shift_intervals columns and
     the overtime / early-leave fields use the segment the employee
     actually worked.
+
+    `policy_overrides` is the dict returned by
+    `build_overtime_policy_overrides`. When provided, rows whose
+    Employee ID matches a configured override are classified by the
+    policy's own classifier instead of the standard matched-interval
+    logic.
     """
     shift_end_lookup = {
         name: (intervals[-1][1] if intervals else None)
@@ -886,7 +1081,7 @@ def _attach_overtime_info(daily, intervals_lookup):
 
     rows = daily.apply(
         lambda r: pd.Series(
-            _classify_overtime_row(r, intervals_lookup),
+            _classify_overtime_row(r, intervals_lookup, policy_overrides),
             index=_OVERTIME_RESULT_COLS,
         ),
         axis=1,
@@ -2339,13 +2534,20 @@ def _build_schedule_lookup_audit(df, schedules_df, schedule_lookup):
 
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
                       alias_audit=None, period_start=None, period_end=None,
-                      weekly_off_df=None):
+                      weekly_off_df=None,
+                      overtime_policy_overrides_df=None):
     # Build the source-of-truth schedule matcher ONCE. It indexes the
     # Odoo resources by EMP code, by NBSP-collapsed normalized name,
     # and by stripped-EMP name so the BioTime "First Name" still finds
     # the right shift even when Odoo's name has spacing quirks.
     label_column = _resolve_schedule_label_column(schedules_df) or "Working Time"
     schedule_lookup = ScheduleLookup(schedules_df, label_column=label_column)
+    # Parse the overtime policy override file once (graceful no-op
+    # when absent or empty). Keyed by Employee ID; rows without a
+    # configured override stay on the standard matched-interval logic.
+    overtime_policy_overrides, overtime_policy_warnings = (
+        build_overtime_policy_overrides(overtime_policy_overrides_df)
+    )
     daily = _build_daily_attendance(df, schedule_lookup)
     # Per-row intervals dict keyed by the BioTime First Name, derived
     # from the same matcher used for Shift Start so overtime / early
@@ -2359,7 +2561,10 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     )
     daily = _attach_attendance_status(daily, time_off_df)
     daily = _attach_checkout_info(daily, df)
-    daily = _attach_overtime_info(daily, intervals_lookup)
+    daily = _attach_overtime_info(
+        daily, intervals_lookup,
+        policy_overrides=overtime_policy_overrides,
+    )
     daily = _attach_department(daily, df)
     # Break info is INFORMATIONAL only -- attached before the
     # exclusion pass and never consumed by any downstream KPI.
@@ -2578,5 +2783,8 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()
         ),
         "schedule_lookup_audit": schedule_lookup_audit,
+        "overtime_policy_overrides": overtime_policy_overrides,
+        "overtime_policy_override_warnings": overtime_policy_warnings,
+        "overtime_policy_override_count": len(overtime_policy_overrides),
     }
     return summary, daily

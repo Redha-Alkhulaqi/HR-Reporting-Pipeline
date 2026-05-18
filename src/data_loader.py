@@ -101,6 +101,45 @@ def load_employee_weekly_off_file(file_path):
     return _load_table(file_path, "employee weekly off file")
 
 
+_OVERTIME_POLICY_COLUMNS = [
+    "Employee ID", "Employee Name", "Policy Type",
+    "Standard Hours", "Active", "Notes",
+]
+
+
+def load_overtime_policy_overrides_file(file_path):
+    """Load per-employee overtime policy overrides (OPTIONAL).
+
+    Schema (one row per employee that needs a non-standard overtime
+    calculation):
+      Employee ID     -- integer (preferred match key; post-alias).
+      Employee Name   -- informational; used as fallback when ID blank
+                          if the project allows name-based matching.
+      Policy Type     -- name of the policy. Currently the engine
+                          supports:
+                            TOTAL_SPAN_MINUS_8H
+                              overtime = max(0, last_checkout -
+                                              first_checkin - standard)
+                              and the standard defaults to 8h00 but is
+                              configurable via the next column.
+      Standard Hours  -- threshold subtracted from the span. Accepted
+                          formats: "08:00", "8:00", "8", "8.5", numeric
+                          (8 or 8.5). Defaults to "08:00".
+      Active          -- TRUE/FALSE; FALSE rows are ignored.
+      Notes           -- free text for HR audit.
+
+    Returns an empty DataFrame with the expected schema when the file
+    is missing so callers can treat the feature as a no-op.
+    """
+    if not file_path.exists():
+        print(
+            f"No overtime policy overrides file at {file_path}; "
+            "every employee uses the standard matched-interval policy."
+        )
+        return pd.DataFrame(columns=_OVERTIME_POLICY_COLUMNS)
+    return _load_table(file_path, "overtime policy overrides file")
+
+
 _ALIAS_COLUMNS = [
     "Old Employee ID", "Current Employee ID", "Employee Name",
     "Source", "Active", "Notes",

@@ -543,6 +543,7 @@ def export_report(summary, daily):
                 "worked_minutes", "scheduled_minutes",
                 "matched_scheduled_minutes",
                 "overtime_minutes", "overtime_status",
+                "overtime_policy", "overtime_calculation_note",
             ]],
         )
 
