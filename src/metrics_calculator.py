@@ -216,6 +216,211 @@ def _normalize_name(name):
     return " ".join(str(name).split()).lower()
 
 
+# EMP-code pattern. Matches "EMP420", "emp 420", "EMP-420", "EMP_420".
+_EMP_CODE_RE = re.compile(r"EMP[\s_\-]?(\d+)", re.IGNORECASE)
+
+
+def _extract_emp_code(name):
+    """Return the EMP code (e.g. "EMP420") inside a name, or None.
+
+    Recognises any of:
+        "MOHAMMED LAHIQ ALMUTAIRI-EMP420"
+        "Mohammed Lahiq Almutairi EMP 420"
+        "...-emp_420"
+    The returned code is upper-cased and digit-only-suffixed so
+    EMP-code matching is stable regardless of spacing or separators.
+    """
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return None
+    match = _EMP_CODE_RE.search(str(name))
+    if not match:
+        return None
+    return f"EMP{match.group(1)}"
+
+
+def _strip_emp_code(name):
+    """Return `name` with any EMP code (and trailing separator) removed.
+
+    "MOHAMMED LAHIQ ALMUTAIRI-EMP420" -> "MOHAMMED LAHIQ ALMUTAIRI"
+    """
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return ""
+    cleaned = _EMP_CODE_RE.sub("", str(name))
+    # Trim trailing separators ("- ", " _", etc.) left by the cut.
+    cleaned = re.sub(r"[\s_\-]+$", "", cleaned)
+    return cleaned
+
+
+def _strong_normalize(name):
+    """Aggressive name key for schedule matching.
+
+    Replaces NBSP (U+00A0) and other unicode whitespace with regular
+    spaces, collapses runs of whitespace, uppercases, and trims. NBSP
+    is a real-world hazard in Odoo exports -- a name like
+    "MOHAMMED\\xa0LAHIQ ALMUTAIRI" looks identical to a human but does
+    not match the BioTime "MOHAMMED LAHIQ ALMUTAIRI" with `==`.
+    """
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return ""
+    text = str(name).replace("\xa0", " ").replace("​", " ")
+    return " ".join(text.split()).upper()
+
+
+# Candidate column names for the "shift label" column in the Odoo
+# resource export. Ordered by preference; first existing column wins.
+_SCHEDULE_LABEL_CANDIDATES = (
+    "Working Time", "Working Hours", "Resource Calendar",
+    "Calendar", "Schedule",
+)
+
+
+def _resolve_schedule_label_column(schedules_df):
+    """Return the column name that carries the Odoo shift label, or None."""
+    if schedules_df is None or schedules_df.empty:
+        return None
+    for col in _SCHEDULE_LABEL_CANDIDATES:
+        if col in schedules_df.columns:
+            return col
+    return None
+
+
+class ScheduleLookup:
+    """Multi-key schedule lookup with deterministic priority.
+
+    Priority used by `match`:
+      1. EMP code (e.g. "EMP420") if present in both the attendance
+         name and exactly one schedule row.
+      2. Exact `_strong_normalize` match (handles NBSP, casing,
+         whitespace collapse) when the result is unique.
+      3. Stripped-EMP normalized match (compare names with the EMP
+         code removed) when the result is unique.
+      4. Substring "fuzzy-safe" match: schedule name contains the
+         attendance name or vice versa, only when exactly one
+         schedule row qualifies (avoids picking the wrong twin).
+
+    `match(first_name)` returns a dict with the matched intervals,
+    the matched schedule name, the rule that fired ("emp_code",
+    "exact_normalized", "stripped_emp", "substring_unique", or "" for
+    no match), and the raw Working Time label.
+    """
+
+    def __init__(self, schedules_df, label_column="Working Time"):
+        self._label_column = label_column
+        self._by_emp_code = {}
+        self._by_strong_norm = {}
+        self._by_stripped = {}
+        self._all_entries = []
+        self._duplicate_emp_codes = set()
+        self._duplicate_strong = set()
+        self._duplicate_stripped = set()
+        if schedules_df is None or schedules_df.empty:
+            return
+        if label_column not in schedules_df.columns:
+            return
+        for _, row in schedules_df.iterrows():
+            raw_name = row.get("Name")
+            if raw_name is None or (isinstance(raw_name, float) and pd.isna(raw_name)):
+                continue
+            label = row.get(label_column)
+            intervals = extract_shift_intervals(label)
+            entry = {
+                "name": str(raw_name),
+                "label": None if pd.isna(label) else str(label),
+                "intervals": intervals,
+            }
+            self._all_entries.append(entry)
+            emp_code = _extract_emp_code(raw_name)
+            if emp_code:
+                if emp_code in self._by_emp_code and self._by_emp_code[emp_code] is not entry:
+                    self._duplicate_emp_codes.add(emp_code)
+                else:
+                    self._by_emp_code[emp_code] = entry
+            strong = _strong_normalize(raw_name)
+            if strong:
+                if strong in self._by_strong_norm and self._by_strong_norm[strong] is not entry:
+                    self._duplicate_strong.add(strong)
+                else:
+                    self._by_strong_norm[strong] = entry
+            stripped = _strong_normalize(_strip_emp_code(raw_name))
+            if stripped:
+                if stripped in self._by_stripped and self._by_stripped[stripped] is not entry:
+                    self._duplicate_stripped.add(stripped)
+                else:
+                    self._by_stripped[stripped] = entry
+
+    @staticmethod
+    def _empty_match():
+        return {
+            "intervals": [],
+            "matched_name": None,
+            "matched_by": "",
+            "working_time": None,
+        }
+
+    def match(self, attendance_name):
+        if attendance_name is None or (isinstance(attendance_name, float) and pd.isna(attendance_name)):
+            return self._empty_match()
+        text = str(attendance_name)
+
+        emp_code = _extract_emp_code(text)
+        if emp_code and emp_code in self._by_emp_code and emp_code not in self._duplicate_emp_codes:
+            entry = self._by_emp_code[emp_code]
+            return {
+                "intervals": entry["intervals"],
+                "matched_name": entry["name"],
+                "matched_by": "emp_code",
+                "working_time": entry["label"],
+            }
+
+        strong = _strong_normalize(text)
+        if strong and strong in self._by_strong_norm and strong not in self._duplicate_strong:
+            entry = self._by_strong_norm[strong]
+            return {
+                "intervals": entry["intervals"],
+                "matched_name": entry["name"],
+                "matched_by": "exact_normalized",
+                "working_time": entry["label"],
+            }
+
+        stripped = _strong_normalize(_strip_emp_code(text))
+        if stripped and stripped in self._by_stripped and stripped not in self._duplicate_stripped:
+            entry = self._by_stripped[stripped]
+            return {
+                "intervals": entry["intervals"],
+                "matched_name": entry["name"],
+                "matched_by": "stripped_emp",
+                "working_time": entry["label"],
+            }
+
+        # Last-resort: bidirectional substring match, but only if EXACTLY one
+        # candidate matches (so we never silently pick the wrong twin).
+        if stripped or strong:
+            needle = stripped or strong
+            candidates = []
+            for entry in self._all_entries:
+                hay_strong = _strong_normalize(entry["name"])
+                hay_stripped = _strong_normalize(_strip_emp_code(entry["name"]))
+                if not (hay_strong or hay_stripped):
+                    continue
+                if (
+                    needle and hay_stripped and (needle in hay_stripped or hay_stripped in needle)
+                ) or (
+                    needle and hay_strong and (needle in hay_strong or hay_strong in needle)
+                ):
+                    candidates.append(entry)
+            unique = {id(c): c for c in candidates}
+            if len(unique) == 1:
+                entry = next(iter(unique.values()))
+                return {
+                    "intervals": entry["intervals"],
+                    "matched_name": entry["name"],
+                    "matched_by": "substring_unique",
+                    "working_time": entry["label"],
+                }
+
+        return self._empty_match()
+
+
 def _build_exclusion_rules(excluded_df):
     """Parse the exclusion DataFrame into a list of rule dicts.
 
@@ -320,17 +525,32 @@ def _compute_risk(late_count, total_late_minutes, missing_checkout_count, excuse
 
 
 def _build_shift_intervals_lookup(schedules_df):
-    """Return dict: cleaned employee name -> list of (start_HHMM, end_HHMM)."""
-    schedules = schedules_df[["Name", "Working Time"]].copy()
+    """Return dict: cleaned employee name -> list of (start_HHMM, end_HHMM).
+
+    Kept for backward compatibility (a few callers expect the dict).
+    New code should prefer `ScheduleLookup`, which understands EMP codes
+    and NBSP-laced Odoo names. The dict produced here is keyed by the
+    schedule's raw `Name` after .strip() and represents the legacy view.
+    """
+    label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+    if label_col not in schedules_df.columns or "Name" not in schedules_df.columns:
+        return {}
+    schedules = schedules_df[["Name", label_col]].copy()
     schedules["Name"] = schedules["Name"].astype(str).str.strip()
-    schedules["intervals"] = schedules["Working Time"].apply(extract_shift_intervals)
+    schedules["intervals"] = schedules[label_col].apply(extract_shift_intervals)
     return schedules.set_index("Name")["intervals"].to_dict()
 
 
 
 
-def _build_daily_attendance(df, shift_lookup):
-    """Aggregate punches into one row per (employee, day) with raw delay info."""
+def _build_daily_attendance(df, schedule_lookup):
+    """Aggregate punches into one row per (employee, day) with raw delay info.
+
+    `schedule_lookup` is a `ScheduleLookup` instance. Each unique
+    `First Name` in the attendance data is resolved through the
+    multi-key matcher; the matched intervals fill the `Shift Start`
+    and `matched_*` columns. Missing matches become `missing_schedule=True`.
+    """
     check_ins = df[df["Punch State"] == "Check In"].copy()
     check_ins["First Name"] = check_ins["First Name"].astype(str).str.strip()
 
@@ -343,7 +563,21 @@ def _build_daily_attendance(df, shift_lookup):
         .rename(columns={"Punch Time": "Check In"})
     )
 
-    daily["Shift Start"] = daily["First Name"].map(shift_lookup)
+    # Resolve schedule per unique name once, then map back to all rows.
+    unique_names = daily["First Name"].drop_duplicates().tolist()
+    name_to_match = {n: schedule_lookup.match(n) for n in unique_names}
+
+    daily["Shift Start"] = daily["First Name"].map(
+        lambda n: (name_to_match[n]["intervals"][0][0]
+                   if name_to_match.get(n) and name_to_match[n]["intervals"]
+                   else None)
+    )
+    daily["matched_schedule_name"] = daily["First Name"].map(
+        lambda n: name_to_match.get(n, {}).get("matched_name")
+    )
+    daily["matched_by"] = daily["First Name"].map(
+        lambda n: name_to_match.get(n, {}).get("matched_by") or ""
+    )
     daily["missing_schedule"] = daily["Shift Start"].isna()
     daily["Delay Minutes"] = daily.apply(
         lambda row: _delay_minutes(row["Check In"], row["Shift Start"])
@@ -1988,18 +2222,116 @@ def filter_inputs_for_report(df, schedules_df, time_off_df, excluded_df):
     return filtered_df, filtered_schedules, filtered_time_off, hidden_count
 
 
+_SCHEDULE_AUDIT_COLUMNS = [
+    "Employee ID", "First Name", "attendance_employee_name",
+    "matched_schedule_name", "matched_by",
+    "working_time_raw", "shift_start", "shift_end",
+    "missing_schedule", "missing_reason",
+]
+
+
+def _build_schedule_lookup_audit(df, schedules_df, schedule_lookup):
+    """One row per (Employee ID, First Name) in attendance.
+
+    Documents how the schedule was matched (or why it was not). The
+    matched_by column makes it easy to spot fragile matches:
+    "emp_code" / "exact_normalized" are reliable; "stripped_emp" or
+    "substring_unique" tend to need HR follow-up.
+
+    Side effect: warns to stdout when an employee carries an EMP code
+    that exists nowhere in the resources export -- the most common
+    cause of a stale Odoo extract.
+    """
+    label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+    if df is None or df.empty or "First Name" not in df.columns:
+        return pd.DataFrame(columns=_SCHEDULE_AUDIT_COLUMNS)
+
+    pairs = (
+        df[["Employee ID", "First Name"]]
+        .dropna(subset=["First Name"])
+        .drop_duplicates()
+        .sort_values(["First Name", "Employee ID"])
+        .reset_index(drop=True)
+    )
+
+    schedule_emp_codes = set()
+    if schedules_df is not None and "Name" in schedules_df.columns:
+        for raw in schedules_df["Name"].dropna():
+            code = _extract_emp_code(raw)
+            if code:
+                schedule_emp_codes.add(code)
+
+    rows = []
+    for _, r in pairs.iterrows():
+        first_name = str(r["First Name"])
+        attendance_name = first_name.strip()
+        match = schedule_lookup.match(first_name)
+        intervals = match["intervals"]
+        shift_start = intervals[0][0] if intervals else None
+        shift_end = intervals[-1][1] if intervals else None
+        missing = not intervals
+        emp_code = _extract_emp_code(first_name)
+
+        if missing:
+            if emp_code and emp_code in schedule_emp_codes:
+                reason = (
+                    f"EMP code {emp_code} appears in Odoo resources but "
+                    f"shift label could not be parsed (check {label_col})"
+                )
+            elif emp_code:
+                reason = (
+                    f"EMP code {emp_code} absent from Odoo resources export "
+                    f"-- refresh the Resources file"
+                )
+            else:
+                reason = (
+                    "Attendance name has no EMP code and no normalized "
+                    "match in Odoo resources"
+                )
+            # Surface the warning to the log so HR / engineers spot
+            # stale extracts without having to open the audit sheet.
+            print(
+                f"WARNING: Schedule not matched for {attendance_name} "
+                f"(Employee ID {r['Employee ID']}). {reason}"
+            )
+        else:
+            reason = ""
+
+        rows.append({
+            "Employee ID": r["Employee ID"],
+            "First Name": attendance_name,
+            "attendance_employee_name": attendance_name,
+            "matched_schedule_name": match["matched_name"],
+            "matched_by": match["matched_by"] or ("none" if missing else ""),
+            "working_time_raw": match["working_time"],
+            "shift_start": shift_start,
+            "shift_end": shift_end,
+            "missing_schedule": missing,
+            "missing_reason": reason,
+        })
+    return pd.DataFrame(rows, columns=_SCHEDULE_AUDIT_COLUMNS)
+
+
 def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
                       alias_audit=None, period_start=None, period_end=None,
                       weekly_off_df=None):
-    # Build the source-of-truth intervals lookup ONCE; derive the
-    # single-time lookups from it so all three views stay consistent
-    # even when shifts are split.
-    intervals_lookup = _build_shift_intervals_lookup(schedules_df)
-    shift_lookup = {
-        name: (intervals[0][0] if intervals else None)
-        for name, intervals in intervals_lookup.items()
+    # Build the source-of-truth schedule matcher ONCE. It indexes the
+    # Odoo resources by EMP code, by NBSP-collapsed normalized name,
+    # and by stripped-EMP name so the BioTime "First Name" still finds
+    # the right shift even when Odoo's name has spacing quirks.
+    label_column = _resolve_schedule_label_column(schedules_df) or "Working Time"
+    schedule_lookup = ScheduleLookup(schedules_df, label_column=label_column)
+    daily = _build_daily_attendance(df, schedule_lookup)
+    # Per-row intervals dict keyed by the BioTime First Name, derived
+    # from the same matcher used for Shift Start so overtime / early
+    # leave honour the same matching decisions.
+    intervals_lookup = {
+        n: schedule_lookup.match(n)["intervals"]
+        for n in daily["First Name"].drop_duplicates()
     }
-    daily = _build_daily_attendance(df, shift_lookup)
+    schedule_lookup_audit = _build_schedule_lookup_audit(
+        df, schedules_df, schedule_lookup
+    )
     daily = _attach_attendance_status(daily, time_off_df)
     daily = _attach_checkout_info(daily, df)
     daily = _attach_overtime_info(daily, intervals_lookup)
@@ -2210,5 +2542,6 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         "excluded_employee_count": int(
             daily.loc[daily["is_excluded"], "Employee ID"].nunique()
         ),
+        "schedule_lookup_audit": schedule_lookup_audit,
     }
     return summary, daily

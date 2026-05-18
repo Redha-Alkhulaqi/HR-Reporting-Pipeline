@@ -17,8 +17,34 @@ def load_attendance_file(file_path):
     return _load_table(file_path, "attendance file", excel_header=1)
 
 
+_SCHEDULE_LABEL_ALIASES = (
+    "Working Time", "Working Hours", "Resource Calendar",
+    "Calendar", "Schedule",
+)
+
+
 def load_working_schedule_file(file_path):
-    return _load_table(file_path, "working schedule file")
+    """Load the Odoo resource.resource export.
+
+    Odoo exports the shift label under several names depending on the
+    extract template ("Working Time", "Working Hours", "Resource
+    Calendar", "Calendar", "Schedule"). Whichever variant exists is
+    renamed to "Working Time" so the rest of the pipeline can keep
+    using a single canonical column.
+    """
+    df = _load_table(file_path, "working schedule file")
+    if "Working Time" not in df.columns:
+        for alt in _SCHEDULE_LABEL_ALIASES:
+            if alt == "Working Time":
+                continue
+            if alt in df.columns:
+                print(
+                    f"Schedule label column detected as '{alt}'; "
+                    "renaming to 'Working Time' for downstream use."
+                )
+                df = df.rename(columns={alt: "Working Time"})
+                break
+    return df
 
 
 def load_time_off_file(file_path):

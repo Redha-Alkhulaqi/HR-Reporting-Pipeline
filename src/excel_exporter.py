@@ -598,6 +598,16 @@ def export_report(summary, daily):
             wb.create_sheet("Employee ID Alias Audit"), alias_audit
         )
 
+    # Schedule lookup audit -- one row per (Employee ID, attendance name)
+    # describing how the Odoo schedule was matched (or why not). Always
+    # emitted so HR can audit Missing Schedule rows even when zero rows
+    # are missing.
+    schedule_audit = summary.get("schedule_lookup_audit")
+    if schedule_audit is not None and not schedule_audit.empty:
+        _build_data_sheet(
+            wb.create_sheet("Schedule Lookup Audit"), schedule_audit
+        )
+
     # Manual punch corrections that did NOT clear the approval / evidence
     # gates -- exposed for Exceptions & Manual Review follow-up.
     rejected_corrections = summary.get("rejected_punch_corrections")
