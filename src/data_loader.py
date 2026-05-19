@@ -12,9 +12,131 @@ def _load_table(file_path, label, excel_header=0):
     raise ValueError(f"Unsupported file type: {suffix}")
 
 
+# Columns we MUST find on the header row of any attendance export.
+_REQUIRED_ATTENDANCE_HEADERS = ("Employee ID", "First Name", "Date")
+
+
+def _find_attendance_header_row(file_path, max_scan_rows=20):
+    """Scan the first `max_scan_rows` rows for the real header.
+
+    BioTime exports vary by template:
+    - "Transaction" template: one banner row above the headers.
+    - "First In Last Out Report" template: up to 4 banner rows
+      (report title, period, company, blank) above the headers.
+    We auto-detect the row whose cells include every name in
+    `_REQUIRED_ATTENDANCE_HEADERS`. Returns the 0-indexed row number.
+    Raises ValueError if no plausible header is found.
+    """
+    raw = pd.read_excel(file_path, header=None, nrows=max_scan_rows)
+    required = set(_REQUIRED_ATTENDANCE_HEADERS)
+    for i in range(len(raw)):
+        values = {str(v).strip() for v in raw.iloc[i].dropna()}
+        if required.issubset(values):
+            return i
+    raise ValueError(
+        f"Could not find an attendance header row in the first "
+        f"{max_scan_rows} rows of {file_path}. Expected to see "
+        f"all of: {sorted(required)}."
+    )
+
+
+def _normalize_attendance_date(value):
+    """Return YYYY-MM-DD string regardless of source representation."""
+    if pd.isna(value):
+        return value
+    if hasattr(value, "strftime"):  # datetime / pd.Timestamp / datetime.date
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    # Already ISO?
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    # DD-MM-YYYY (the format the new BioTime "First In Last Out" export
+    # writes -- e.g. "26-04-2026").
+    try:
+        return pd.to_datetime(text, dayfirst=True).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return text
+
+
+def _normalize_punch_time(value):
+    """Return HH:MM:SS string; the downstream parser requires seconds."""
+    if pd.isna(value):
+        return value
+    if hasattr(value, "strftime"):  # datetime.time / Timestamp
+        return value.strftime("%H:%M:%S")
+    text = str(value).strip()
+    if len(text) == 5 and text[2] == ":":  # HH:MM -> HH:MM:00
+        return text + ":00"
+    return text
+
+
+def _convert_first_in_last_out_to_punches(df):
+    """Convert a "First In Last Out Report" dataframe (one row per
+    employee-day) into the punch-events schema the pipeline expects
+    (one row per Check In / Check Out). Break punches are NOT
+    synthesized because the new export does not carry them; the
+    break analytics will simply report zeros for affected days.
+    """
+    rows = []
+    for rec in df.to_dict("records"):
+        eid = rec.get("Employee ID")
+        name = rec.get("First Name")
+        date = _normalize_attendance_date(rec.get("Date"))
+        first_in = rec.get("First Check In")
+        last_out = rec.get("Last Check Out")
+        if pd.notna(first_in):
+            rows.append({
+                "Employee ID": eid, "First Name": name, "Date": date,
+                "Punch Time": _normalize_punch_time(first_in),
+                "Punch State": "Check In",
+            })
+        if pd.notna(last_out):
+            rows.append({
+                "Employee ID": eid, "First Name": name, "Date": date,
+                "Punch Time": _normalize_punch_time(last_out),
+                "Punch State": "Check Out",
+            })
+    return pd.DataFrame(
+        rows,
+        columns=["Employee ID", "First Name", "Date", "Punch Time", "Punch State"],
+    )
+
+
+def _adapt_attendance_dataframe(df):
+    """Return a punch-events dataframe regardless of source template.
+
+    - "Transaction" template (legacy): already has Punch Time +
+      Punch State; only normalize Date and Punch Time formats.
+    - "First In Last Out Report" template (new): synthesize a Check
+      In and a Check Out row per source row.
+    """
+    cols = set(df.columns)
+    if {"Punch Time", "Punch State"}.issubset(cols):
+        # Legacy schema; only enforce string types on key columns.
+        df = df.copy()
+        df["Date"] = df["Date"].apply(_normalize_attendance_date)
+        df["Punch Time"] = df["Punch Time"].apply(_normalize_punch_time)
+        return df
+    if {"First Check In", "Last Check Out"}.issubset(cols):
+        return _convert_first_in_last_out_to_punches(df)
+    raise ValueError(
+        "Unrecognized attendance export schema. Expected either "
+        "'Punch Time'+'Punch State' columns (legacy Transaction export) "
+        "or 'First Check In'+'Last Check Out' columns (First In Last "
+        f"Out Report export). Got columns: {sorted(cols)}"
+    )
+
+
 def load_attendance_file(file_path):
-    # BioTime export has a one-row "Transaction" banner above the real headers.
-    return _load_table(file_path, "attendance file", excel_header=1)
+    """Load any supported BioTime export and return punch-events rows.
+
+    Auto-detects the header row (BioTime banner length varies by
+    template) and the export schema. Returns a DataFrame with
+    columns: Employee ID, First Name, Date, Punch Time, Punch State.
+    """
+    header_idx = _find_attendance_header_row(file_path)
+    df = _load_table(file_path, "attendance file", excel_header=header_idx)
+    return _adapt_attendance_dataframe(df)
 
 
 _SCHEDULE_LABEL_ALIASES = (
