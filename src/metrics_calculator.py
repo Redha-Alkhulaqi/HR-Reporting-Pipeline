@@ -89,6 +89,7 @@ Risk scoring (compound, replaces the old minutes-only band)
   contributing factors.
 """
 import math
+import os
 import re
 from datetime import datetime
 
@@ -1249,7 +1250,29 @@ _ABSENCE_DETAILS_COLS = [
     "Is Secondment", "Weekly Off Days", "Is Weekly Off",
     "Is Holiday", "Is Excluded",
     "Counted As Absence", "Absence Reason",
+    # Split-shift-aware audit columns. The pipeline classifies each
+    # scheduled interval (e.g. 09:00-13:00 morning + 18:00-22:00
+    # evening) independently. `Absence Day Value` is fractional --
+    # 0.0 if every interval was attended, 0.5 if half the intervals
+    # were missed, 1.0 for a full no-show. `Attended Day Value` is
+    # the complement on scheduled non-leave days, and both Day Values
+    # sum to 1.0 per scheduled non-leave day so the audit balances.
+    "Scheduled Intervals", "Check-In Times",
+    "Attended Intervals", "Missed Intervals",
+    "Attended Day Value", "Absence Day Value",
 ]
+
+
+# Early-grace window for interval-level attendance: a Check In that
+# lands at most this many minutes BEFORE the interval's official
+# start still counts as attending that interval.
+_ABSENCE_INTERVAL_EARLY_GRACE_MIN = int(
+    os.getenv("ABSENCE_INTERVAL_EARLY_GRACE_MINUTES", "60")
+)
+# We DO NOT extend the window after the interval's end -- a Check In
+# after the interval has already closed cannot retroactively attend
+# it, and an early Check In for the next interval will match that
+# interval's grace window instead.
 
 
 _VALID_WEEKDAYS = (
@@ -1348,10 +1371,60 @@ def _build_weekly_off_lookup(weekly_off_df, df,
     return lookup
 
 
+def _classify_interval_attendance(check_in_time_strs, date_str, intervals,
+                                  early_grace_min=_ABSENCE_INTERVAL_EARLY_GRACE_MIN):
+    """For each scheduled interval on `date_str`, decide if it was attended.
+
+    A Check In counts toward an interval when its timestamp falls in
+    [interval_start - early_grace_min, interval_end]. Intervals do
+    not share check-ins -- the first matching interval wins (the
+    grace windows are designed not to overlap for a well-formed
+    split shift).
+
+    Returns
+        (attended_count, total_count, attended_labels, missed_labels)
+    where each *_labels entry is a "HH:MM-HH:MM" string identifying
+    the interval. `total_count` is `len(intervals)`; both lists
+    partition the intervals.
+    """
+    if not intervals:
+        return 0, 0, [], []
+
+    # Parse the check-in times to full Timestamps on `date_str`. Bad
+    # values are skipped silently -- the absence engine should not
+    # crash on a malformed punch.
+    check_in_dts = []
+    for t in check_in_time_strs:
+        if t is None:
+            continue
+        try:
+            check_in_dts.append(pd.to_datetime(f"{date_str} {t}"))
+        except (ValueError, TypeError):
+            continue
+
+    interval_dts = _intervals_to_datetimes(date_str, intervals)
+    grace = pd.Timedelta(minutes=early_grace_min)
+
+    attended_labels = []
+    missed_labels = []
+    attended_count = 0
+    for i, (start_dt, end_dt) in enumerate(interval_dts):
+        label = f"{intervals[i][0]}-{intervals[i][1]}"
+        window_start = start_dt - grace
+        attended = any(window_start <= dt <= end_dt for dt in check_in_dts)
+        if attended:
+            attended_count += 1
+            attended_labels.append(label)
+        else:
+            missed_labels.append(label)
+    return attended_count, len(intervals), attended_labels, missed_labels
+
+
 def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                             weekly_off_df=None,
                             period_start=None, period_end=None,
-                            schedule_lookup=None):
+                            schedule_lookup=None,
+                            intervals_lookup=None):
     """Return one row per (employee, date) explaining why a day was or
     was not counted as an absence.
 
@@ -1411,6 +1484,16 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
 
     # Cross-reference Check Ins -- only Check Ins count as attendance.
     check_ins = df_clean[df_clean["Punch State"] == "Check In"]
+    # Per-(employee, date) Check In time list, used by the
+    # interval-aware classifier to decide which scheduled intervals
+    # were attended (vs. just whether ANY check-in happened that day).
+    check_ins_by_emp_date = {}
+    if not check_ins.empty:
+        for eid, date, time in check_ins[
+            ["Employee ID", "Date", "Punch Time"]
+        ].itertuples(index=False):
+            key = (eid, str(date))
+            check_ins_by_emp_date.setdefault(key, []).append(str(time))
     attendance_set = set()
     if not check_ins.empty:
         for eid, date in check_ins[["Employee ID", "Date"]].itertuples(
@@ -1479,10 +1562,20 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
     if schedule_lookup is None:
         label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
         schedule_lookup = ScheduleLookup(schedules_df, label_column=label_col)
+    employee_names = {n for n in emp_to_name.values() if n}
     has_schedule_by_name = {
         n: bool(schedule_lookup.match(n)["intervals"])
-        for n in {n for n in emp_to_name.values() if n}
+        for n in employee_names
     }
+    # Intervals lookup keyed by First Name. Caller can pass in the
+    # canonical lookup built once in calculate_metrics; otherwise we
+    # derive it from the same matcher so the absence engine sees the
+    # SAME shift schedule the overtime engine sees.
+    if intervals_lookup is None:
+        intervals_lookup = {
+            n: schedule_lookup.match(n)["intervals"]
+            for n in employee_names
+        }
     # Per-employee weekly off: caller-supplied overrides win, otherwise
     # the global WEEKLY_OFF_DAYS default applies.
     weekly_off_lookup = _build_weekly_off_lookup(
@@ -1503,6 +1596,10 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         emp_timeoff = timeoff_by_id.get(eid, {})
         emp_off_days = weekly_off_lookup.get(eid, set(WEEKLY_OFF_DAYS))
         emp_off_days_label = _format_off_days(emp_off_days)
+        intervals = intervals_lookup.get(name) if name else None
+        scheduled_intervals_label = (
+            " / ".join(f"{s}-{e}" for s, e in intervals) if intervals else ""
+        )
         for date_str in period_dates:
             weekday = pd.to_datetime(date_str).strftime("%A")
             is_weekly_off = weekday in emp_off_days
@@ -1510,6 +1607,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             is_scheduled = (
                 has_schedule and not is_weekly_off and not is_holiday
             )
+            check_in_times = check_ins_by_emp_date.get((eid, date_str), [])
             has_att = (eid, date_str) in attendance_set
             tof = emp_timeoff.get(date_str)
             type_name = tof[1] if tof else None
@@ -1517,15 +1615,51 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             is_vacation = tof is not None and tof[0] == "vacation"
             is_secondment = tof is not None and tof[0] == "secondment"
             has_off = tof is not None
-            counted = (
-                is_scheduled
-                and not has_att
-                and not has_off
-                and not is_excluded
+
+            # Per-interval attendance classification. Only meaningful
+            # for scheduled non-leave days; everything else gets
+            # zero-day values so the audit balances cleanly.
+            attended_count, total_intervals, attended_labels, missed_labels = (
+                _classify_interval_attendance(
+                    check_in_times, date_str, intervals or [],
+                )
             )
+            if is_scheduled and not has_off and not is_excluded:
+                if total_intervals > 0 and attended_count > 0:
+                    # Interval-aware: at least one interval was
+                    # genuinely attended. Compute the fractional
+                    # split-shift absence day value.
+                    absence_day_value = (
+                        (total_intervals - attended_count) / total_intervals
+                    )
+                    attended_day_value = attended_count / total_intervals
+                elif has_att:
+                    # Conservative fallback: there IS a check-in but
+                    # none of it fell inside any known interval window
+                    # (e.g. employee with no parseable shift, or odd
+                    # punch time). Preserve legacy semantics -- count
+                    # as a fully attended day, never penalize HR data
+                    # quirks as a partial absence.
+                    absence_day_value = 0.0
+                    attended_day_value = 1.0
+                else:
+                    # No check-in and no leave -> full absence.
+                    absence_day_value = 1.0
+                    attended_day_value = 0.0
+            else:
+                absence_day_value = 0.0
+                attended_day_value = 0.0
+
+            counted = absence_day_value > 0  # backward-compat bool
 
             if counted:
-                reason = "Absent (no attendance and no approved time off)"
+                if absence_day_value < 1.0 and missed_labels:
+                    reason = (
+                        f"Partial absence ({absence_day_value:g} day; "
+                        f"missed {', '.join(missed_labels)})"
+                    )
+                else:
+                    reason = "Absent (no attendance and no approved time off)"
             elif is_excluded:
                 reason = "Excluded employee"
             elif is_holiday:
@@ -1560,6 +1694,12 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 "Is Excluded": is_excluded,
                 "Counted As Absence": counted,
                 "Absence Reason": reason,
+                "Scheduled Intervals": scheduled_intervals_label,
+                "Check-In Times": ", ".join(check_in_times),
+                "Attended Intervals": ", ".join(attended_labels),
+                "Missed Intervals": ", ".join(missed_labels),
+                "Attended Day Value": round(attended_day_value, 2),
+                "Absence Day Value": round(absence_day_value, 2),
             })
     return pd.DataFrame(rows, columns=_ABSENCE_DETAILS_COLS)
 
@@ -1597,19 +1737,24 @@ def _build_absence_audit(absence_details):
         return pd.DataFrame(columns=_ABSENCE_AUDIT_COLS)
 
     working = df["Is Scheduled Working Day"]
-    df["_sched"] = working
-    df["_attended"] = working & df["Has Attendance"]
+    df["_sched"] = working.astype(int)
+    # attended_days and absence_days are now FRACTIONAL (split-shift
+    # partial-attendance days contribute 0.5 to each). Permission /
+    # vacation / secondment remain whole-day (one full day each,
+    # mutually exclusive with attended/absence by current rule
+    # priority: leave fires only when there's no check-in).
+    df["_attended"] = df["Attended Day Value"]
     df["_permission"] = (
         working & ~df["Has Attendance"] & df["Is Permission"]
-    )
+    ).astype(int)
     df["_vacation"] = (
         working & ~df["Has Attendance"] & df["Is Vacation"] & ~df["Is Permission"]
-    )
+    ).astype(int)
     df["_secondment"] = (
         working & ~df["Has Attendance"] & df["Is Secondment"]
         & ~df["Is Permission"] & ~df["Is Vacation"]
-    )
-    df["_absence"] = df["Counted As Absence"]
+    ).astype(int)
+    df["_absence"] = df["Absence Day Value"]
 
     grp = (
         df.groupby(["Employee ID", "First Name"], as_index=False)
@@ -1622,19 +1767,21 @@ def _build_absence_audit(absence_details):
             absence_days=("_absence", "sum"),
         )
     )
-    int_cols = [
-        "scheduled_working_days", "attended_days",
-        "permission_days", "vacation_days",
-        "secondment_days", "absence_days",
-    ]
-    for col in int_cols:
+    grp["scheduled_working_days"] = grp["scheduled_working_days"].astype(int)
+    for col in ("permission_days", "vacation_days", "secondment_days"):
         grp[col] = grp[col].astype(int)
-    grp["reconciliation_delta"] = (
+    # Fractional values; round to 1 dp for display. The reconciliation
+    # delta is computed BEFORE rounding so it stays exact for the
+    # raw model and we don't drift from compounded display rounding.
+    raw_balance = (
         grp["scheduled_working_days"]
         - (grp["attended_days"] + grp["permission_days"]
            + grp["vacation_days"] + grp["secondment_days"]
            + grp["absence_days"])
     )
+    grp["attended_days"] = grp["attended_days"].astype(float).round(1)
+    grp["absence_days"] = grp["absence_days"].astype(float).round(1)
+    grp["reconciliation_delta"] = raw_balance.round(2)
 
     # Attach the per-employee weekly off policy (and its complement)
     # so the audit row tells HR exactly which weekdays drove the
@@ -1788,8 +1935,12 @@ def _build_executive_employee_summary(daily, absence_by_id,
         )
     )
 
+    # `absence_by_id` is now fractional (split-shift partial absences
+    # contribute 0.5). Round to 1 dp so the executive sheet matches
+    # the audit row exactly; the Excel formatter renders this column
+    # as 0.0 hours notation.
     grp["No of Absence Days"] = (
-        grp["Employee ID"].map(absence_by_id).fillna(0).astype(int)
+        grp["Employee ID"].map(absence_by_id).fillna(0.0).astype(float).round(1)
     )
     grp["No of Permission Days"] = (
         grp["Employee ID"].map(permission_by_id).fillna(0).astype(int)
@@ -2734,6 +2885,7 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         weekly_off_df=weekly_off_df,
         period_start=period_start, period_end=period_end,
         schedule_lookup=schedule_lookup,
+        intervals_lookup=intervals_lookup,
     )
     absence_audit = _build_absence_audit(absence_details)
     (absence_by_id, permission_by_id,

@@ -353,6 +353,13 @@ ABSENCE_DETAILS_COLUMNS = [
     "Is Secondment", "Weekly Off Days", "Is Weekly Off",
     "Is Holiday", "Is Excluded",
     "Counted As Absence", "Absence Reason",
+    # Split-shift-aware audit columns appended in the partial-absence
+    # release. The fractional `Absence Day Value` (0.0/0.5/1.0)
+    # supersedes the binary `Counted As Absence` for split-shift
+    # employees; the binary flag is kept for backward compatibility.
+    "Scheduled Intervals", "Check-In Times",
+    "Attended Intervals", "Missed Intervals",
+    "Attended Day Value", "Absence Day Value",
 ]
 
 

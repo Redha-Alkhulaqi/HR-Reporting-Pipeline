@@ -229,20 +229,23 @@ def _build_executive_employee_sheet(ws, df):
     if data_end_row <= 1:
         return
 
-    # Integer columns: Employee ID (1) plus the four day-count columns
-    # (3 Absence, 4 Permission, 5 Vacation, 6 Secondment).
+    # Integer columns: Employee ID (1) plus the three whole-day-count
+    # columns (4 Permission, 5 Vacation, 6 Secondment). Absence (col 3)
+    # is rendered at 1 decimal because split-shift partial-attendance
+    # days contribute fractional (e.g. 0.5) values to it.
     _format_numeric_cells(
         ws,
         rows=range(2, data_end_row + 1),
-        cols=[1, 3, 4, 5, 6],
+        cols=[1, 4, 5, 6],
         number_format="#,##0",
     )
-    # All hour columns at 1 decimal: 7 Late, 8 OT Actual, 9 OT Payable,
-    # 10 Early Leave, 11 Break, 12 Break After Policy.
+    # 1-decimal columns: 3 Absence (fractional for split-shift),
+    # 7 Late, 8 OT Actual, 9 OT Payable, 10 Early Leave, 11 Break,
+    # 12 Break After Policy.
     _format_numeric_cells(
         ws,
         rows=range(2, data_end_row + 1),
-        cols=[7, 8, 9, 10, 11, 12],
+        cols=[3, 7, 8, 9, 10, 11, 12],
         number_format="0.0",
     )
     # Visually highlight the payable-overtime column.
