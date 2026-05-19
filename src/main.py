@@ -272,6 +272,7 @@ def main(argv=None):
         # from every exported sheet and from the Claude markdown. The
         # internal `summary`/`daily` above keep them for audit.
         report_summary, report_daily = summary, daily
+        report_punches, report_schedules = df, schedules_df
         if HIDE_EXCLUDED_EMPLOYEES_FROM_REPORT and excluded_df is not None and not excluded_df.empty:
             r_df, r_sched, r_tof, hidden = filter_inputs_for_report(
                 df, schedules_df, time_off_df, excluded_df
@@ -284,6 +285,7 @@ def main(argv=None):
                     weekly_off_df=weekly_off_df,
                     overtime_policy_overrides_df=overtime_policy_overrides_df,
                 )
+                report_punches, report_schedules = r_df, r_sched
             logger.info(f"Excluded employees hidden from report: {hidden}")
 
         # Surface manual-correction rejections in the exported workbook.
@@ -292,7 +294,10 @@ def main(argv=None):
         generate_report(report_summary)
         logger.info("HR report generated")
 
-        export_report(report_summary, report_daily)
+        export_report(
+            report_summary, report_daily,
+            raw_punches=report_punches, schedules_df=report_schedules,
+        )
         logger.info("Excel report exported")
 
         generate_ai_input_file(report_summary, report_daily)

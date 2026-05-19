@@ -188,6 +188,246 @@ def _append_executive_notes_block(ws, n_cols):
                    end_row=badge_row, end_column=min(6, n_cols))
 
 
+# ---------------------------------------------------------------------------
+# Employee Attendance sheet
+# ---------------------------------------------------------------------------
+# Audit-focused daily summary, one row per (raw Employee ID, Date). Split-
+# shift employees get two pairs of Check-In / Check-Out columns so HR can
+# review morning vs evening attendance at a glance. Rows that arrived via
+# alias mapping or a manual punch correction are visually highlighted.
+
+
+_EMP_ATTENDANCE_COLS = [
+    "Raw Employee ID", "Canonical Employee Name", "Canonical Employee ID",
+    "Date", "Weekday",
+    "Shift 1 Check-In", "Shift 1 Check-Out",
+    "Shift 2 Check-In", "Shift 2 Check-Out",
+    "Total Time", "Source / Notes",
+]
+
+
+def _hhmm(time_str):
+    """'HH:MM:SS' -> 'HH:MM' for readable display. Empty/NA stays empty."""
+    if time_str is None or (isinstance(time_str, float) and pd.isna(time_str)):
+        return ""
+    text = str(time_str).strip()
+    if not text:
+        return ""
+    if len(text) >= 5 and text[2] == ":":
+        return text[:5]
+    return text
+
+
+def _time_str_to_minutes(time_str):
+    """'HH:MM:SS' -> int minutes from midnight. Returns None on bad input."""
+    try:
+        parts = str(time_str).split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, AttributeError, IndexError):
+        return None
+
+
+def _minutes_between(start_str, end_str):
+    """Minutes between two HH:MM[:SS] strings. Handles midnight wrap."""
+    start = _time_str_to_minutes(start_str)
+    end = _time_str_to_minutes(end_str)
+    if start is None or end is None:
+        return 0
+    if end < start:
+        end += 24 * 60
+    return end - start
+
+
+def _format_hours_minutes(total_minutes):
+    """Render a minutes count as 'HH:MM'."""
+    if total_minutes <= 0:
+        return ""
+    hours, minutes = divmod(int(total_minutes), 60)
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def _shift_split_boundary(intervals):
+    """Time-of-day (minutes from midnight) that splits a 2-interval
+    schedule into Shift 1 / Shift 2 partitions. Returns None when the
+    schedule has a single interval or an overlapping pair.
+    """
+    if not intervals or len(intervals) < 2:
+        return None
+    try:
+        first_end_h, first_end_m = map(int, intervals[0][1].split(":"))
+        second_start_h, second_start_m = map(int, intervals[1][0].split(":"))
+    except (ValueError, IndexError, AttributeError):
+        return None
+    first_end_min = first_end_h * 60 + first_end_m
+    second_start_min = second_start_h * 60 + second_start_m
+    if second_start_min <= first_end_min:
+        return None  # overlapping or back-to-back -- can't split
+    return (first_end_min + second_start_min) // 2
+
+
+def build_employee_attendance_rows(raw_punches, schedules_df):
+    """Return the per-(raw Employee ID, Date) daily-summary rows.
+
+    Public so tests can pin the shape without touching openpyxl. The
+    rendering side of this is `_build_employee_attendance_sheet`.
+
+    Behavior:
+    - Only Check In + Check Out events count. Breaks have their own sheet.
+    - Rows are grouped by `original_employee_id` so HR sees the RAW
+      source ID (pre-alias); a parallel column carries the canonical
+      Name + ID. If alias mapping is not present in `raw_punches`,
+      the canonical ID is reused as the raw ID.
+    - Split-shift partitioning uses the midpoint between the first
+      interval's end and the second interval's start as the boundary.
+      Single-interval employees put every punch into Shift 1; rows
+      without a parseable schedule also collapse into Shift 1.
+    - Shift 1/2 Check-In = earliest CI in that partition;
+      Shift 1/2 Check-Out = latest CO in that partition. Sub-second
+      duplicates collapse naturally via min/max.
+    - Total Time = sum of paired-shift worked minutes ('HH:MM').
+    - Source / Notes documents alias remapping and any manual
+      correction that contributed to the row.
+    """
+    if raw_punches is None or raw_punches.empty:
+        return pd.DataFrame(columns=_EMP_ATTENDANCE_COLS)
+
+    df = raw_punches.copy()
+    if "original_employee_id" not in df.columns:
+        df["original_employee_id"] = df["Employee ID"]
+    df = df[df["Punch State"].isin(["Check In", "Check Out"])].copy()
+    if df.empty:
+        return pd.DataFrame(columns=_EMP_ATTENDANCE_COLS)
+
+    # Canonical name lookup keyed by canonical Employee ID.
+    canon_name_by_id = {}
+    for ceid, sub in df.groupby("Employee ID"):
+        names = sub["First Name"].dropna().astype(str).str.strip()
+        names = names[names != ""]
+        canon_name_by_id[ceid] = names.iloc[0] if not names.empty else ""
+
+    # Schedule intervals (per canonical name) -- reuse the ScheduleLookup
+    # to honor EMP-code + NBSP-normalized matching.
+    from metrics_calculator import (
+        ScheduleLookup,
+        _resolve_schedule_label_column,
+    )
+    label_col = _resolve_schedule_label_column(schedules_df) or "Working Time"
+    schedule_lookup = ScheduleLookup(schedules_df, label_column=label_col)
+    intervals_by_name = {
+        n: schedule_lookup.match(n)["intervals"]
+        for n in canon_name_by_id.values() if n
+    }
+
+    rows = []
+    for (raw_eid, date), grp in df.groupby(
+        ["original_employee_id", "Date"], sort=False
+    ):
+        canonical_eid = grp["Employee ID"].iloc[0]
+        canonical_name = canon_name_by_id.get(canonical_eid, "")
+        intervals = intervals_by_name.get(canonical_name) or []
+        boundary_min = _shift_split_boundary(intervals)
+
+        shift1_cis, shift1_cos, shift2_cis, shift2_cos = [], [], [], []
+        for _, r in grp.sort_values("Punch Time").iterrows():
+            time_str = str(r["Punch Time"])
+            t_min = _time_str_to_minutes(time_str)
+            if t_min is None:
+                continue
+            state = r["Punch State"]
+            if boundary_min is None or t_min < boundary_min:
+                ci_bucket, co_bucket = shift1_cis, shift1_cos
+            else:
+                ci_bucket, co_bucket = shift2_cis, shift2_cos
+            if state == "Check In":
+                ci_bucket.append(time_str)
+            elif state == "Check Out":
+                co_bucket.append(time_str)
+
+        s1_ci = min(shift1_cis) if shift1_cis else ""
+        s1_co = max(shift1_cos) if shift1_cos else ""
+        s2_ci = min(shift2_cis) if shift2_cis else ""
+        s2_co = max(shift2_cos) if shift2_cos else ""
+
+        total_min = 0
+        for ci_str, co_str in ((s1_ci, s1_co), (s2_ci, s2_co)):
+            if ci_str and co_str:
+                total_min += _minutes_between(ci_str, co_str)
+
+        notes_parts = []
+        if "is_manual_correction" in grp.columns and grp["is_manual_correction"].any():
+            notes_parts.append("Manual correction")
+        if raw_eid != canonical_eid:
+            notes_parts.append(f"Aliased from {raw_eid} -> {canonical_eid}")
+        source_label = "; ".join(notes_parts) if notes_parts else "BioTime"
+
+        try:
+            weekday = pd.to_datetime(date).strftime("%a")
+        except (ValueError, TypeError):
+            weekday = ""
+
+        rows.append({
+            "Raw Employee ID": raw_eid,
+            "Canonical Employee Name": canonical_name,
+            "Canonical Employee ID": canonical_eid,
+            "Date": str(date),
+            "Weekday": weekday,
+            "Shift 1 Check-In": _hhmm(s1_ci),
+            "Shift 1 Check-Out": _hhmm(s1_co),
+            "Shift 2 Check-In": _hhmm(s2_ci),
+            "Shift 2 Check-Out": _hhmm(s2_co),
+            "Total Time": _format_hours_minutes(total_min),
+            "Source / Notes": source_label,
+        })
+
+    result = pd.DataFrame(rows, columns=_EMP_ATTENDANCE_COLS)
+    if not result.empty:
+        result = result.sort_values(
+            by=["Canonical Employee Name", "Date", "Raw Employee ID"]
+        ).reset_index(drop=True)
+    return result
+
+
+_ATTENDANCE_ALIAS_FILL = PatternFill("solid", fgColor="FFF2CC")    # light gold
+_ATTENDANCE_MANUAL_FILL = PatternFill("solid", fgColor="DDEBF7")   # light blue
+
+
+def _build_employee_attendance_sheet(ws, df):
+    """Render the Employee Attendance audit sheet."""
+    if df is None or df.empty:
+        ws.append(["(no attendance data available)"])
+        return
+    for row in dataframe_to_rows(df, index=False, header=True):
+        ws.append(_sanitize_row(row))
+    _style_header_row(ws, row=1, n_cols=ws.max_column)
+    # Freeze the employee/date identification columns + header row so
+    # HR can scroll across many days without losing the row anchor.
+    ws.freeze_panes = "F2"
+    if ws.max_row > 1:
+        ws.auto_filter.ref = (
+            f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+        )
+    _autosize_columns(ws, min_width=10, max_width=45)
+
+    # Visual cue: tint rows that came in via alias mapping (gold) or
+    # via a manual punch correction (blue). HR's eye lands on these
+    # for audit much faster than reading the Source / Notes column.
+    if ws.max_row <= 1:
+        return
+    source_col = _EMP_ATTENDANCE_COLS.index("Source / Notes") + 1
+    for r in range(2, ws.max_row + 1):
+        value = ws.cell(row=r, column=source_col).value
+        if not isinstance(value, str):
+            continue
+        fill = None
+        if "Aliased" in value:
+            fill = _ATTENDANCE_ALIAS_FILL
+        elif "Manual" in value:
+            fill = _ATTENDANCE_MANUAL_FILL
+        if fill is not None:
+            for c in range(1, ws.max_column + 1):
+                ws.cell(row=r, column=c).fill = fill
+
+
 def _build_executive_employee_sheet(ws, df):
     """Render the simplified executive Employee Summary sheet.
 
@@ -378,6 +618,15 @@ def _build_dashboard(wb, summary):
     title.value = "HR Reporting Dashboard"
     title.font = _TITLE_FONT
     title.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    # Subtitle with the report timestamp -- helps HR confirm freshness
+    # when the workbook is forwarded or archived.
+    ws.merge_cells("A2:O2")
+    subtitle = ws["A2"]
+    subtitle.value = f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    subtitle.font = Font(italic=True, color="555555", size=10)
+    subtitle.alignment = Alignment(horizontal="left", vertical="center")
 
     # ---------------- Executive KPIs (cols A-B) ----------------
     kpis = [
@@ -423,11 +672,28 @@ def _build_dashboard(wb, summary):
     ws.cell(row=3, column=2, value="Value")
     _style_header_row(ws, row=3, n_cols=2)
     centered = Alignment(horizontal="center", vertical="center")
+    # Zebra striping for the KPI block + green accent for the payable
+    # overtime KPI so it visually matches the Employee Summary
+    # highlight. Yellow-tinted accent for the data-quality score.
+    band = PatternFill("solid", fgColor="F2F2F2")
+    payable_accent = PatternFill("solid", fgColor="E2EFDA")
+    dq_accent = PatternFill("solid", fgColor="FFF2CC")
+    accent_labels = {"Total Over Time (Payable 1.5x) (Hours)": payable_accent,
+                     "Data Quality Score": dq_accent}
     for i, (label, value, fmt) in enumerate(kpis, start=4):
-        ws.cell(row=i, column=1, value=label)
+        label_cell = ws.cell(row=i, column=1, value=label)
         cell = ws.cell(row=i, column=2, value=value)
         cell.number_format = fmt
         cell.alignment = centered
+        accent = accent_labels.get(label)
+        if accent is not None:
+            label_cell.fill = accent
+            cell.fill = accent
+            label_cell.font = Font(bold=True)
+            cell.font = Font(bold=True)
+        elif (i - 4) % 2 == 1:  # alternate-row band
+            label_cell.fill = band
+            cell.fill = band
 
     # ---------------- Backing tables (placed below the charts) ----------------
     # Each chart is 13cm x 7cm (~18 rows tall). Three chart rows anchored
@@ -599,7 +865,16 @@ def _build_dashboard(wb, summary):
     ws.freeze_panes = "A4"
 
 
-def export_report(summary, daily):
+def export_report(summary, daily, raw_punches=None, schedules_df=None):
+    """Write the monthly Excel workbook.
+
+    `raw_punches` is the post-alias, post-manual-correction punch
+    events dataframe (one row per Check In / Check Out / Break event).
+    When provided alongside `schedules_df`, the Employee Attendance
+    audit sheet is rendered with paired-shift columns. Both arguments
+    are optional for backward compat -- old callers that pass only
+    `summary` + `daily` keep working and simply skip the new sheet.
+    """
     print("Exporting Excel report...")
 
     wb = Workbook()
@@ -610,6 +885,17 @@ def export_report(summary, daily):
         wb.create_sheet("Employee Summary"),
         summary.get("executive_employee_summary"),
     )
+    # Employee Attendance -- audit-focused daily summary with split-
+    # shift columns. Placed right after Employee Summary so HR can
+    # cross-reference the executive totals with the per-day source.
+    if raw_punches is not None and schedules_df is not None:
+        attendance_rows = build_employee_attendance_rows(
+            raw_punches, schedules_df,
+        )
+        _build_employee_attendance_sheet(
+            wb.create_sheet("Employee Attendance"),
+            attendance_rows,
+        )
     daily_ws = wb.create_sheet("Daily Attendance")
     _build_data_sheet(daily_ws, daily)
     _apply_daily_conditional_formatting(daily_ws, daily)
