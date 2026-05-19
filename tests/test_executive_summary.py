@@ -353,7 +353,7 @@ ABSENCE_DETAILS_COLUMNS = [
     "Is Secondment", "Weekly Off Days", "Is Weekly Off",
     "Is Holiday", "Is Excluded",
     "Counted As Absence", "Absence Reason",
-    "Scheduled Intervals", "Check-In Times",
+    "Scheduled Intervals", "Check-In Times", "Check-Out Times",
     "Attended Intervals", "Missed Intervals",
     "Attended Day Value", "Absence Day Value",
     # Canonical-identity merge audit columns appended in the

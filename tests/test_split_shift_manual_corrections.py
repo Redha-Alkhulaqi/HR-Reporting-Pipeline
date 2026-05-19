@@ -188,17 +188,19 @@ def test_end_to_end_overtime_picks_up_appended_evening_interval():
 
 
 def test_end_to_end_absence_engine_no_longer_partial_after_corrections():
-    """Before: evening CI missing -> absence engine reports 0.5 day
-    partial absence (only morning interval attended).
+    """Before: evening punches both missing -> absence engine reports
+    0.5 day partial absence (only morning interval attended).
     After: HR adds the evening CI via a manual correction -> both
-    intervals attended -> 0.0 absence day value."""
+    intervals attended -> 0.0 absence day value.
+
+    Note: the morning-only fixture deliberately omits a late CO,
+    otherwise the span-cover rule would credit the evening interval
+    on its own (the rule that fixes the EMP418 2026-05-03 case)."""
     df = pd.DataFrame([
         _punch(4124537, "SAMEER-EMP1", "2026-05-05",
                "09:03:00", "Check In"),
         _punch(4124537, "SAMEER-EMP1", "2026-05-05",
                "13:20:00", "Check Out"),
-        _punch(4124537, "SAMEER-EMP1", "2026-05-05",
-               "22:00:00", "Check Out"),  # late CO but no evening CI
     ])
     # Without the correction, the morning interval is attended (CI 09:03)
     # but the evening interval has no Check In within its grace window
@@ -211,8 +213,11 @@ def test_end_to_end_absence_engine_no_longer_partial_after_corrections():
     assert ad_before["Absence Day Value"] == 0.5
 
     # Add the missing evening Check In via a manual correction.
+    # We also add a late Check Out so the day has a complete evening
+    # pair after correction.
     corrections = pd.DataFrame([
         _correction(4124537, "2026-05-05", "check_in", "18:03:00"),
+        _correction(4124537, "2026-05-05", "check_out", "22:00:00"),
     ])
     df_after, rejected = apply_manual_punch_corrections(df, corrections)
     assert rejected.empty
@@ -341,6 +346,117 @@ def test_event_day_split_not_triggered_when_gap_too_wide():
     out, _ = apply_manual_punch_corrections(df, corrections)
     manual = out[out["is_manual_correction"]].sort_values("Punch Time")
     assert (manual["correction_action"] == "appended").all()
+
+
+def test_emp418_2026_05_03_forgot_evening_ci_but_co_at_shift_end():
+    """Regression: EMP418 on 2026-05-03 has BioTime evidence of the
+    evening shift attendance via a Check Out at 21:00 (= evening
+    shift end), but the evening Check In is missing. The lenient
+    span-cover rule must credit the evening interval as attended so
+    the day classifies as 0.0 absence, NOT 0.5 partial.
+
+    BioTime raw events (already alias-mapped to canonical 4197471):
+      09:12 CI, 13:00 CO   (morning shift, complete pair)
+      21:00 CO             (evening shift CO; no evening CI)
+
+    Day span: 09:12 -> 21:00.
+    Morning  09:00-13:00: covered by direct CI (09:12 in grace window).
+    Evening  17:00-21:00: NO direct CI, but span (09:12, 21:00)
+                          wholly covers [17:00, 21:00] -> credited
+                          via the span-cover rule. Absence Reason
+                          surfaces 'credited via continuous span'.
+    """
+    df = pd.DataFrame([
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-03", "Punch Time": "09:12:06",
+         "Punch State": "Check In"},
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-03", "Punch Time": "09:12:07",
+         "Punch State": "Check In"},
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-03", "Punch Time": "13:00:02",
+         "Punch State": "Check Out"},
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-03", "Punch Time": "21:00:06",
+         "Punch State": "Check Out"},
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-03", "Punch Time": "21:00:07",
+         "Punch State": "Check Out"},
+    ])
+    schedules = pd.DataFrame([{
+        "Name": "MOHAMMED AJISH-EMP418",
+        "Working Time": "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (5:00PM-9:00PM)",
+    }])
+    summary, daily = calculate_metrics(
+        df, schedules,
+        period_start="2026-05-03", period_end="2026-05-03",
+    )
+    ad = summary["absence_details"]
+    row = ad[(ad["Employee ID"] == 4197471)
+             & (ad["Date"] == "2026-05-03")].iloc[0]
+    assert row["Absence Day Value"] == 0.0
+    assert bool(row["Counted As Absence"]) is False
+    assert row["Attended Intervals"] == "09:00-13:00, 17:00-21:00"
+    assert "credited via continuous span" in row["Absence Reason"]
+    assert "17:00-21:00" in row["Absence Reason"]
+
+
+def test_span_cover_does_not_credit_without_any_check_in():
+    """Guard: a lone stray Check Out without a same-day Check In
+    must NOT credit the interval via the span rule. This prevents
+    a 'random late CO at 22:00 from a forgotten badge' from
+    falsely marking the evening interval as attended.
+
+    We seed a Check In on a NEIGHBOURING date so the daily pipeline
+    has data to process; the assertion is about the lone-CO day
+    in isolation."""
+    df = pd.DataFrame([
+        # Neighbouring day with a normal punch -- seeds calculate_metrics
+        {"Employee ID": 1, "First Name": "X-EMP1",
+         "Date": "2026-05-03", "Punch Time": "09:00:00",
+         "Punch State": "Check In"},
+        # The day under test: lone stray Check Out, no Check In.
+        {"Employee ID": 1, "First Name": "X-EMP1",
+         "Date": "2026-05-04", "Punch Time": "22:00:00",
+         "Punch State": "Check Out"},
+    ])
+    schedules = pd.DataFrame([{
+        "Name": "X-EMP1",
+        "Working Time": "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (5:00PM-9:00PM)",
+    }])
+    summary, _ = calculate_metrics(
+        df, schedules,
+        period_start="2026-05-04", period_end="2026-05-04",
+    )
+    ad = summary["absence_details"]
+    row = ad[ad["Date"] == "2026-05-04"].iloc[0]
+    # No CI on the lone-CO day -> span rule cannot fire -> both intervals missed.
+    assert row["Absence Day Value"] == 1.0
+
+
+def test_span_cover_does_not_credit_when_span_too_short():
+    """Guard: span 09:05 -> 13:01 (morning-only) must NOT credit the
+    evening interval via the span rule -- latest CO must reach
+    interval_end."""
+    df = pd.DataFrame([
+        {"Employee ID": 1, "First Name": "X-EMP1",
+         "Date": "2026-05-04", "Punch Time": "09:05:00",
+         "Punch State": "Check In"},
+        {"Employee ID": 1, "First Name": "X-EMP1",
+         "Date": "2026-05-04", "Punch Time": "13:01:00",
+         "Punch State": "Check Out"},
+    ])
+    schedules = pd.DataFrame([{
+        "Name": "X-EMP1",
+        "Working Time": "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (5:00PM-9:00PM)",
+    }])
+    summary, _ = calculate_metrics(
+        df, schedules,
+        period_start="2026-05-04", period_end="2026-05-04",
+    )
+    row = summary["absence_details"].iloc[0]
+    assert row["Absence Day Value"] == 0.5
+    assert row["Missed Intervals"] == "17:00-21:00"
 
 
 def test_emp418_alias_plus_manual_canonical_merge_2026_05_04():

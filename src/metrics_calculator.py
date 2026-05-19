@@ -1257,7 +1257,7 @@ _ABSENCE_DETAILS_COLS = [
     # were missed, 1.0 for a full no-show. `Attended Day Value` is
     # the complement on scheduled non-leave days, and both Day Values
     # sum to 1.0 per scheduled non-leave day so the audit balances.
-    "Scheduled Intervals", "Check-In Times",
+    "Scheduled Intervals", "Check-In Times", "Check-Out Times",
     "Attended Intervals", "Missed Intervals",
     "Attended Day Value", "Absence Day Value",
     # Canonical-identity merge audit columns. `Raw Employee IDs`
@@ -1422,53 +1422,91 @@ def _format_minutes_as_hhmm(total_minutes):
     return f"{hours:02d}:{minutes:02d}"
 
 
-def _classify_interval_attendance(check_in_time_strs, date_str, intervals,
+def _classify_interval_attendance(check_in_time_strs, check_out_time_strs,
+                                  date_str, intervals,
                                   early_grace_min=_ABSENCE_INTERVAL_EARLY_GRACE_MIN):
     """For each scheduled interval on `date_str`, decide if it was attended.
 
-    A Check In counts toward an interval when its timestamp falls in
-    [interval_start - early_grace_min, interval_end]. Intervals do
-    not share check-ins -- the first matching interval wins (the
-    grace windows are designed not to overlap for a well-formed
-    split shift).
+    Two rules can credit an interval as attended:
+
+    1. *Direct CI* (strict): a Check In timestamp lands within
+       [interval_start - early_grace_min, interval_end].
+
+    2. *Span-cover* (lenient): the day's full attendance span --
+       earliest Check In to latest Check Out -- wholly covers the
+       interval window. This catches the realistic case where an
+       employee was on premises through the interval but forgot to
+       punch in for it. Required guards: there MUST be at least one
+       Check In AND one Check Out on the day, AND the earliest CI
+       must precede `interval_start` (with the same early grace),
+       AND the latest CO must reach or pass `interval_end`. A naked
+       stray Check Out without a same-day CI cannot credit an
+       interval via this rule.
 
     Returns
-        (attended_count, total_count, attended_labels, missed_labels)
-    where each *_labels entry is a "HH:MM-HH:MM" string identifying
-    the interval. `total_count` is `len(intervals)`; both lists
-    partition the intervals.
+        (attended_count, total_count, attended_labels, missed_labels,
+         credited_via_span)
+    where `credited_via_span` is a list of interval labels for which
+    the lenient rule fired (used to surface "credited via continuous
+    span" in the audit trail).
     """
     if not intervals:
-        return 0, 0, [], []
+        return 0, 0, [], [], []
 
-    # Parse the check-in times to full Timestamps on `date_str`. Bad
-    # values are skipped silently -- the absence engine should not
-    # crash on a malformed punch.
     check_in_dts = []
-    for t in check_in_time_strs:
+    for t in check_in_time_strs or []:
         if t is None:
             continue
         try:
             check_in_dts.append(pd.to_datetime(f"{date_str} {t}"))
         except (ValueError, TypeError):
             continue
+    check_out_dts = []
+    for t in check_out_time_strs or []:
+        if t is None:
+            continue
+        try:
+            check_out_dts.append(pd.to_datetime(f"{date_str} {t}"))
+        except (ValueError, TypeError):
+            continue
 
     interval_dts = _intervals_to_datetimes(date_str, intervals)
     grace = pd.Timedelta(minutes=early_grace_min)
 
+    earliest_ci = min(check_in_dts) if check_in_dts else None
+    latest_co = max(check_out_dts) if check_out_dts else None
+
     attended_labels = []
     missed_labels = []
+    credited_via_span = []
     attended_count = 0
     for i, (start_dt, end_dt) in enumerate(interval_dts):
         label = f"{intervals[i][0]}-{intervals[i][1]}"
         window_start = start_dt - grace
+        # Rule 1 -- direct CI within the interval grace window.
         attended = any(window_start <= dt <= end_dt for dt in check_in_dts)
         if attended:
             attended_count += 1
             attended_labels.append(label)
-        else:
-            missed_labels.append(label)
-    return attended_count, len(intervals), attended_labels, missed_labels
+            continue
+        # Rule 2 -- span-cover: a CI before the interval start and a
+        # CO at-or-after the interval end. Requires BOTH a CI and a
+        # CO on the day, so a lone stray CO can never credit an
+        # interval. The window_start uses the same early grace so the
+        # rule is consistent with rule 1.
+        if (
+            earliest_ci is not None
+            and latest_co is not None
+            and earliest_ci <= window_start
+            and latest_co >= end_dt
+        ):
+            attended_count += 1
+            attended_labels.append(label)
+            credited_via_span.append(label)
+            continue
+        missed_labels.append(label)
+    return (attended_count, len(intervals),
+            attended_labels, missed_labels, credited_via_span)
 
 
 def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
@@ -1545,6 +1583,18 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         ].itertuples(index=False):
             key = (eid, str(date))
             check_ins_by_emp_date.setdefault(key, []).append(str(time))
+    # Same lookup for Check Outs. The classifier's span-cover rule
+    # credits an interval when the day's full span (earliest CI ->
+    # latest CO) wholly covers the interval window -- the
+    # "employee worked through but forgot a CI" case.
+    check_outs_by_emp_date = {}
+    check_outs = df_clean[df_clean["Punch State"] == "Check Out"]
+    if not check_outs.empty:
+        for eid, date, time in check_outs[
+            ["Employee ID", "Date", "Punch Time"]
+        ].itertuples(index=False):
+            key = (eid, str(date))
+            check_outs_by_emp_date.setdefault(key, []).append(str(time))
     # Canonical-identity merge audit: collect raw source IDs and
     # provenance buckets per (canonical Employee ID, Date) so the
     # Absence Details sheet can show which IDs were merged. The
@@ -1712,6 +1762,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 has_schedule and not is_weekly_off and not is_holiday
             )
             check_in_times = check_ins_by_emp_date.get((eid, date_str), [])
+            check_out_times = check_outs_by_emp_date.get((eid, date_str), [])
             has_att = (eid, date_str) in attendance_set
             tof = emp_timeoff.get(date_str)
             type_name = tof[1] if tof else None
@@ -1723,9 +1774,11 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             # Per-interval attendance classification. Only meaningful
             # for scheduled non-leave days; everything else gets
             # zero-day values so the audit balances cleanly.
-            attended_count, total_intervals, attended_labels, missed_labels = (
+            (attended_count, total_intervals, attended_labels,
+             missed_labels, credited_via_span) = (
                 _classify_interval_attendance(
-                    check_in_times, date_str, intervals or [],
+                    check_in_times, check_out_times,
+                    date_str, intervals or [],
                 )
             )
             # Event-day-split override: HR explicitly marked this
@@ -1789,6 +1842,11 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 reason = "Employee has no Odoo schedule"
             elif has_att and has_off:
                 reason = f"Attended with approved time off ({type_name})"
+            elif has_att and credited_via_span:
+                reason = (
+                    "Present (interval(s) credited via continuous span: "
+                    f"{', '.join(credited_via_span)})"
+                )
             elif has_att:
                 reason = "Present (has attendance)"
             elif has_off:
@@ -1824,6 +1882,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 "Absence Reason": reason,
                 "Scheduled Intervals": scheduled_intervals_label,
                 "Check-In Times": ", ".join(check_in_times),
+                "Check-Out Times": ", ".join(check_out_times),
                 "Attended Intervals": ", ".join(attended_labels),
                 "Missed Intervals": ", ".join(missed_labels),
                 "Attended Day Value": round(attended_day_value, 2),
