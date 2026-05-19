@@ -569,7 +569,15 @@ def _pie_chart(title, labels, values):
     chart.set_categories(labels)
     chart.width = _CHART_WIDTH
     chart.height = _CHART_HEIGHT
-    chart.dataLabels = DataLabelList(showPercent=True)
+    # Show 'Category, percent' (e.g. 'On Time, 78%') and explicitly
+    # hide the series name so labels don't read 'Series1, ...'. The
+    # left-side legend stays redundant-but-helpful for small slices.
+    chart.dataLabels = DataLabelList(
+        showCatName=True,
+        showPercent=True,
+        showSerName=False,
+        showVal=False,
+    )
     return chart
 
 
@@ -594,6 +602,10 @@ def _line_chart(title, labels, values_with_header):
     chart.set_categories(labels)
     chart.width = _CHART_WIDTH
     chart.height = _CHART_HEIGHT
+    # A single-series line should render as one consistent colour;
+    # Excel otherwise auto-cycles segments through theme colours which
+    # makes the trend look like a rainbow.
+    chart.varyColors = False
     return chart
 
 
@@ -780,12 +792,17 @@ def _build_dashboard(wb, summary):
             number_format="0.0",
         )
 
-    # ---------------- Charts: 2x2 grid (anchors leave visual buffer) ----------------
-    # Layout:
-    #   C3   K3
-    #   C22  K22
+    # ---------------- Charts: 2x2+1 grid (anchors leave visual buffer) ----------------
+    # Layout (rows shifted down 2 rows in v1.x so the chart titles no
+    # longer collide with the KPI header at row 3 -- previously the
+    # 'Generated' subtitle pushed the KPI block down but chart anchors
+    # stayed at row 3, causing the pie title to render INSIDE the
+    # 'Metric / Value' header band):
+    #   C5    K5
+    #   C24   K24
+    #   C43
     # Each chart 13cm x 7cm leaves a column/row of breathing room between
-    # neighbours and above the underlying-data section that starts at row 42.
+    # neighbours and above the underlying-data section that starts at row 60.
 
     # Chart 1 (top-left): Attendance Status pie.
     pie_labels = Reference(ws, min_col=1,
@@ -794,7 +811,7 @@ def _build_dashboard(wb, summary):
                            min_row=status_data_start, max_row=status_data_end)
     ws.add_chart(
         _pie_chart("Attendance Status Breakdown", pie_labels, pie_values),
-        "C3",
+        "C5",
     )
 
     # Chart 2 (top-right): Daily Late Trend (references Daily Trend sheet).
@@ -810,7 +827,7 @@ def _build_dashboard(wb, summary):
             )
             ws.add_chart(
                 _line_chart("Daily Late Trend", trend_labels, trend_values),
-                "K3",
+                "K5",
             )
 
     # Chart 3 (bottom-left): Top Late Employees -- references the
@@ -828,7 +845,7 @@ def _build_dashboard(wb, summary):
         ws.add_chart(
             _bar_chart("Top Late Employees", late_labels, late_values,
                        horizontal=True),
-            "C22",
+            "C24",
         )
 
     # Chart 4 (bottom-right): Top Overtime Employees.
@@ -840,7 +857,7 @@ def _build_dashboard(wb, summary):
         ws.add_chart(
             _bar_chart("Top Overtime Employees", ot_labels, ot_values,
                        horizontal=True),
-            "K22",
+            "K24",
         )
 
     # Chart 5 (third row, left): Top Early Leave Employees.
@@ -852,7 +869,7 @@ def _build_dashboard(wb, summary):
         ws.add_chart(
             _bar_chart("Top Early Leave Employees", el_labels, el_values,
                        horizontal=True),
-            "C41",
+            "C43",
         )
 
     # ---------------- Column widths + freeze ----------------
