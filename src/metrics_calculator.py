@@ -1494,6 +1494,17 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         ].itertuples(index=False):
             key = (eid, str(date))
             check_ins_by_emp_date.setdefault(key, []).append(str(time))
+    # Per-(employee, date) flag: did HR explicitly mark this day as
+    # an event-day continuous-attendance split? When yes the absence
+    # engine treats the day as fully attended even when the split
+    # boundary breaks scheduled-interval windows. The tag comes from
+    # the manual punch corrections engine; if the column is absent
+    # this stays an empty set (no-op).
+    event_day_split_emp_dates = set()
+    if "correction_action" in df_clean.columns:
+        split_rows = df_clean[df_clean["correction_action"] == "event_day_split"]
+        for eid, date in split_rows[["Employee ID", "Date"]].itertuples(index=False):
+            event_day_split_emp_dates.add((eid, str(date)))
     attendance_set = set()
     if not check_ins.empty:
         for eid, date in check_ins[["Employee ID", "Date"]].itertuples(
@@ -1624,6 +1635,17 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                     check_in_times, date_str, intervals or [],
                 )
             )
+            # Event-day-split override: HR explicitly marked this
+            # (emp, date) as a continuous-attendance split. The day
+            # is treated as fully attended regardless of how the
+            # manual boundary lands relative to scheduled intervals.
+            is_event_day_split = (eid, date_str) in event_day_split_emp_dates
+            if is_event_day_split and is_scheduled and not has_off and not is_excluded:
+                attended_count = max(attended_count, total_intervals)
+                attended_labels = [
+                    f"{s}-{e}" for s, e in (intervals or [])
+                ]
+                missed_labels = []
             if is_scheduled and not has_off and not is_excluded:
                 if total_intervals > 0 and attended_count > 0:
                     # Interval-aware: at least one interval was
@@ -1660,6 +1682,10 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                     )
                 else:
                     reason = "Absent (no attendance and no approved time off)"
+            elif is_event_day_split:
+                reason = (
+                    "Manual correction - event day continuous attendance split"
+                )
             elif is_excluded:
                 reason = "Excluded employee"
             elif is_holiday:

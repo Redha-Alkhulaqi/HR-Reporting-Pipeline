@@ -324,29 +324,66 @@ def build_employee_attendance_rows(raw_punches, schedules_df):
     ):
         canonical_eid = grp["Employee ID"].iloc[0]
         canonical_name = canon_name_by_id.get(canonical_eid, "")
-        intervals = intervals_by_name.get(canonical_name) or []
-        boundary_min = _shift_split_boundary(intervals)
-
-        shift1_cis, shift1_cos, shift2_cis, shift2_cos = [], [], [], []
-        for _, r in grp.sort_values("Punch Time").iterrows():
-            time_str = str(r["Punch Time"])
-            t_min = _time_str_to_minutes(time_str)
-            if t_min is None:
+        # Chronological CI/CO pairing: walk events in time order and
+        # close each open interval when the first Check Out arrives.
+        # This robustly handles split-shifts, event-day manual splits,
+        # and sub-second duplicates without depending on a static
+        # midpoint boundary (which broke when HR's manual split landed
+        # before the configured boundary).
+        events = sorted(
+            (str(t), s) for t, s in zip(
+                grp["Punch Time"].astype(str), grp["Punch State"]
+            )
+        )
+        paired_intervals = []
+        open_ci = None
+        latest_co = None
+        for time_str, state in events:
+            if _time_str_to_minutes(time_str) is None:
                 continue
-            state = r["Punch State"]
-            if boundary_min is None or t_min < boundary_min:
-                ci_bucket, co_bucket = shift1_cis, shift1_cos
-            else:
-                ci_bucket, co_bucket = shift2_cis, shift2_cos
             if state == "Check In":
-                ci_bucket.append(time_str)
+                if open_ci is None:
+                    open_ci = time_str
+                # else: subsequent Check In while one is already open
+                # -- keep the earlier one (sub-second device duplicates).
             elif state == "Check Out":
-                co_bucket.append(time_str)
+                if open_ci is not None:
+                    paired_intervals.append((open_ci, time_str))
+                    open_ci = None
+                latest_co = time_str  # capture for display even if unpaired
 
-        s1_ci = min(shift1_cis) if shift1_cis else ""
-        s1_co = max(shift1_cos) if shift1_cos else ""
-        s2_ci = min(shift2_cis) if shift2_cis else ""
-        s2_co = max(shift2_cos) if shift2_cos else ""
+        # Column-placement strategy:
+        # - 2+ paired intervals: chronological order (Shift 1 = first,
+        #   Shift 2 = second). Supports event-day splits and any other
+        #   case where the boundary doesn't fall at the schedule's
+        #   static midpoint.
+        # - exactly 1 paired interval: route by the schedule's static
+        #   midpoint so a partial-day row still shows morning-only in
+        #   Shift 1 OR evening-only in Shift 2 (preserves the previous
+        #   audit semantic for split-shift partial attendance).
+        s1_ci, s1_co, s2_ci, s2_co = "", "", "", ""
+        if len(paired_intervals) >= 2:
+            s1_ci, s1_co = paired_intervals[0]
+            s2_ci, s2_co = paired_intervals[1]
+        elif len(paired_intervals) == 1:
+            intervals = intervals_by_name.get(canonical_name) or []
+            boundary_min = _shift_split_boundary(intervals)
+            ci_only, co_only = paired_intervals[0]
+            ci_min = _time_str_to_minutes(ci_only)
+            if (boundary_min is not None and ci_min is not None
+                    and ci_min >= boundary_min):
+                s2_ci, s2_co = ci_only, co_only
+            else:
+                s1_ci, s1_co = ci_only, co_only
+
+        # If the final Check Out is later than the paired close (i.e.
+        # the device sent a duplicate Check Out a second later), prefer
+        # the LATER time for HR display -- they want to see when the
+        # employee actually left, not the millisecond-earlier reading.
+        if s2_co and latest_co and latest_co > s2_co:
+            s2_co = latest_co
+        elif s1_co and not s2_co and latest_co and latest_co > s1_co:
+            s1_co = latest_co
 
         total_min = 0
         for ci_str, co_str in ((s1_ci, s1_co), (s2_ci, s2_co)):
@@ -354,7 +391,13 @@ def build_employee_attendance_rows(raw_punches, schedules_df):
                 total_min += _minutes_between(ci_str, co_str)
 
         notes_parts = []
-        if "is_manual_correction" in grp.columns and grp["is_manual_correction"].any():
+        is_event_split = (
+            "correction_action" in grp.columns
+            and (grp["correction_action"] == "event_day_split").any()
+        )
+        if is_event_split:
+            notes_parts.append("Event-day split (manual)")
+        elif "is_manual_correction" in grp.columns and grp["is_manual_correction"].any():
             notes_parts.append("Manual correction")
         if raw_eid != canonical_eid:
             notes_parts.append(f"Aliased from {raw_eid} -> {canonical_eid}")

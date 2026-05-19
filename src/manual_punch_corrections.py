@@ -50,6 +50,31 @@ REQUIRED_COLUMNS = [
     "evidence_type", "approval_status",
 ]
 
+# Event-day-split detection -- triggers only when a manual correction
+# pair clearly INSERTS a boundary inside an existing continuous span.
+# We require:
+#   * one manual Check Out + one manual Check In on the same (emp, date)
+#   * the two manual times within `_EVENT_DAY_SPLIT_MAX_GAP_MIN` minutes
+#   * a BioTime Check In that predates both manual times
+#   * a BioTime Check Out that follows both manual times
+# When this holds, both manual rows are tagged
+# correction_action="event_day_split", source="manual_event_day_split",
+# and the absence engine treats the day as fully attended even when the
+# split breaks the schedule's interval windows.
+_EVENT_DAY_SPLIT_MAX_GAP_MIN = 5
+_EVENT_DAY_SPLIT_DEFAULT_REASON = (
+    "Manual correction - event day continuous attendance split"
+)
+
+
+def _to_minutes(time_str):
+    """'HH:MM:SS' / 'HH:MM' -> minutes from midnight. None on bad input."""
+    try:
+        parts = str(time_str).split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, AttributeError, IndexError):
+        return None
+
 _PUNCH_TYPE_TO_STATE = {
     "check_in": "Check In",
     "check_out": "Check Out",
@@ -145,6 +170,90 @@ def _exact_duplicate_mask(att_df, emp_id, date_str, punch_state, time_str):
         return same_state
     times = att_df["Punch Time"].astype(str)
     return same_state & (times == time_str)
+
+
+def _detect_event_day_splits(inserts, att_df):
+    """Tag insert rows that form an event-day continuous-attendance split.
+
+    HR sometimes needs to split a single continuous BioTime span (e.g.
+    employee worked 09:03 through 18:09 straight on an event day) into
+    TWO accounting intervals so the day reconciles against a split-
+    shift schedule. They do this by adding two manual corrections:
+    a Check Out at the boundary and a Check In one minute later.
+
+    This helper detects that exact pattern -- WITHOUT a global change
+    to how all manual corrections are interpreted -- and rewrites
+    those two `inserts` rows with the dedicated audit tags. Inserts
+    that don't match the pattern are left untouched and stay as the
+    plain "appended" appendees handled by the previous safety-net
+    release.
+
+    The detection is intentionally narrow:
+    1. exactly ONE manual CI and ONE manual CO on the same (emp, date),
+    2. the two manual times within `_EVENT_DAY_SPLIT_MAX_GAP_MIN` of
+       each other,
+    3. a BioTime Check In on that date with time STRICTLY BEFORE both
+       manual times (the morning anchor of the continuous span),
+    4. a BioTime Check Out on that date with time STRICTLY AFTER both
+       manual times (the evening anchor of the continuous span).
+    Anything else -- 1 manual punch, 3+ manual punches, manual pair
+    far apart, no surrounding BioTime span -- keeps the regular
+    "appended" semantics so normal employees see no behaviour change.
+    """
+    if not inserts:
+        return
+
+    groups = {}
+    for ins in inserts:
+        key = (ins["Employee ID"], ins["Date"])
+        groups.setdefault(key, []).append(ins)
+
+    att_dates = pd.to_datetime(att_df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    for (emp_id, date_str), group in groups.items():
+        manual_cis = [r for r in group if r["Punch State"] == "Check In"]
+        manual_cos = [r for r in group if r["Punch State"] == "Check Out"]
+        if len(manual_cis) != 1 or len(manual_cos) != 1:
+            continue
+        ci_min = _to_minutes(manual_cis[0]["Punch Time"])
+        co_min = _to_minutes(manual_cos[0]["Punch Time"])
+        if ci_min is None or co_min is None:
+            continue
+        if abs(ci_min - co_min) > _EVENT_DAY_SPLIT_MAX_GAP_MIN:
+            continue
+        lo, hi = min(ci_min, co_min), max(ci_min, co_min)
+
+        # Inspect BioTime rows on this (emp, date): we need a CI
+        # strictly before the split boundary and a CO strictly after.
+        day_mask = (
+            (att_df["Employee ID"] == emp_id)
+            & (att_dates == date_str)
+            & (~att_df["is_manual_correction"].astype(bool))
+        )
+        biotime = att_df[day_mask]
+        if biotime.empty:
+            continue
+        bt_ci_times = [
+            _to_minutes(t) for t in
+            biotime.loc[biotime["Punch State"] == "Check In", "Punch Time"]
+                   .astype(str).tolist()
+        ]
+        bt_co_times = [
+            _to_minutes(t) for t in
+            biotime.loc[biotime["Punch State"] == "Check Out", "Punch Time"]
+                   .astype(str).tolist()
+        ]
+        has_pre_ci = any(t is not None and t < lo for t in bt_ci_times)
+        has_post_co = any(t is not None and t > hi for t in bt_co_times)
+        if not (has_pre_ci and has_post_co):
+            continue
+
+        # All four conditions hold -> tag both inserts.
+        for ins in group:
+            ins["correction_action"] = "event_day_split"
+            ins["correction_source"] = "manual_event_day_split"
+            if not ins.get("correction_reason"):
+                ins["correction_reason"] = _EVENT_DAY_SPLIT_DEFAULT_REASON
 
 
 def _empty_rejected():
@@ -265,6 +374,10 @@ def apply_manual_punch_corrections(attendance_df, corrections_df,
         att.loc[ov["mask"], "correction_reason"] = ov["reason"]
         att.loc[ov["mask"], "correction_verified_by"] = ov["verifier"]
         att.loc[ov["mask"], "correction_action"] = "overridden"
+
+    # Narrow event-day-split detection runs ONLY against the candidate
+    # inserts -- it never re-tags rows the user did not explicitly add.
+    _detect_event_day_splits(inserts, att)
 
     if inserts:
         att = pd.concat([att, pd.DataFrame(inserts)], ignore_index=True)

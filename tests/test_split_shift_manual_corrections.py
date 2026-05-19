@@ -244,3 +244,121 @@ def test_audit_columns_record_correction_action_per_row():
     # Manual rows carry their action.
     manual = out[out["is_manual_correction"]].sort_values("Punch Time")
     assert manual["correction_action"].tolist() == ["added", "appended"]
+
+
+# -- event-day continuous-attendance split detection ---------------------
+
+def test_emp403_event_day_split_2026_05_14_end_to_end():
+    """The reported event-day case for ABDUL SAMEER PARAMMAL-EMP403:
+    on 2026-05-14 the employee worked the BioTime span 09:03 -> 18:09
+    continuously. HR splits it via two manual corrections (CO at
+    13:00, CI at 13:01) so it reconciles against his 09:00-13:00 +
+    18:00-22:00 split schedule.
+
+    Required after the split:
+      * 4 punches on the day (2 BioTime + 2 manual, none rejected)
+      * both manual rows tagged correction_action='event_day_split'
+      * source = 'manual_event_day_split'
+      * default audit reason carries 'event day continuous attendance split'
+      * Absence Day Value = 0.0 (full day, NOT partial)
+      * Absence reason carries the event-day-split note
+    """
+    df = pd.DataFrame([
+        _punch(4124537, "ABDUL SAMEER-EMP403", "2026-05-14",
+               "09:03:27", "Check In"),
+        _punch(4124537, "ABDUL SAMEER-EMP403", "2026-05-14",
+               "09:03:29", "Check In"),
+        _punch(4124537, "ABDUL SAMEER-EMP403", "2026-05-14",
+               "18:09:28", "Check Out"),
+        _punch(4124537, "ABDUL SAMEER-EMP403", "2026-05-14",
+               "18:09:30", "Check Out"),
+    ])
+    corrections = pd.DataFrame([
+        # Blank reason -- the engine should fill in the default
+        # event-day-split note so audit readers see the intent.
+        _correction(4124537, "2026-05-14", "check_out", "13:00:00",
+                    reason=""),
+        _correction(4124537, "2026-05-14", "check_in",  "13:01:00",
+                    reason=""),
+    ])
+    out, rejected = apply_manual_punch_corrections(df, corrections)
+
+    assert rejected.empty
+    day = out[out["Date"] == "2026-05-14"]
+    assert len(day) == 6   # 4 BioTime + 2 manual
+    manual = day[day["is_manual_correction"]].sort_values("Punch Time")
+    assert manual["correction_action"].tolist() == [
+        "event_day_split", "event_day_split",
+    ]
+    assert (manual["correction_source"] == "manual_event_day_split").all()
+    assert (manual["correction_reason"] ==
+            "Manual correction - event day continuous attendance split").all()
+
+    # End-to-end absence engine: the day must be classified as fully
+    # attended (Absence Day Value = 0.0), NOT 0.5 partial.
+    summary, daily = calculate_metrics(
+        out, _split_schedules(),  # SAMEER-EMP1 fixture name; reuses split-shift label
+        period_start="2026-05-14", period_end="2026-05-14",
+    )
+    # Filter absence details to our employee
+    ad = summary["absence_details"]
+    row = ad[ad["Employee ID"] == 4124537].iloc[0]
+    assert row["Absence Day Value"] == 0.0
+    assert bool(row["Counted As Absence"]) is False
+    assert "event day continuous attendance split" in row["Absence Reason"].lower()
+
+
+def test_event_day_split_not_triggered_when_no_surrounding_biotime_span():
+    """The detection is intentionally narrow: it only fires when
+    BioTime brackets the manual pair. A 'naked' CO+CI manual pair on
+    a day with no BioTime Check Out after the boundary must NOT be
+    tagged event_day_split (it would silence a partial-absence
+    flag we want HR to investigate)."""
+    df = pd.DataFrame([
+        _punch(1, "X-EMP1", "2026-05-14", "12:00:00", "Check In"),
+    ])
+    corrections = pd.DataFrame([
+        _correction(1, "2026-05-14", "check_out", "13:00:00"),
+        _correction(1, "2026-05-14", "check_in",  "13:01:00"),
+    ])
+    out, _ = apply_manual_punch_corrections(df, corrections)
+    manual = out[out["is_manual_correction"]]
+    assert (manual["correction_action"] != "event_day_split").all()
+    assert (manual["correction_source"] == "manual_camera_verified").all()
+
+
+def test_event_day_split_not_triggered_when_gap_too_wide():
+    """A CO at 13:00 and a CI at 14:00 (60-minute gap) is not a
+    boundary insertion -- it's a long break. Don't tag as split."""
+    df = pd.DataFrame([
+        _punch(1, "X-EMP1", "2026-05-14", "09:00:00", "Check In"),
+        _punch(1, "X-EMP1", "2026-05-14", "18:00:00", "Check Out"),
+    ])
+    corrections = pd.DataFrame([
+        _correction(1, "2026-05-14", "check_out", "13:00:00"),
+        _correction(1, "2026-05-14", "check_in",  "14:00:00"),
+    ])
+    out, _ = apply_manual_punch_corrections(df, corrections)
+    manual = out[out["is_manual_correction"]].sort_values("Punch Time")
+    assert (manual["correction_action"] == "appended").all()
+
+
+def test_event_day_split_does_not_affect_normal_employees():
+    """A single-shift employee with one CI + one CO never triggers
+    the event-day-split pattern (HR would need to add a CI+CO pair
+    explicitly, which is the opt-in)."""
+    df = pd.DataFrame([
+        _punch(1, "SOLO-EMP1", "2026-05-04", "08:00:00", "Check In"),
+        _punch(1, "SOLO-EMP1", "2026-05-04", "17:00:00", "Check Out"),
+    ])
+    # Single manual correction -- nothing for the detector to pair up.
+    corrections = pd.DataFrame([
+        _correction(1, "2026-05-04", "check_in", "07:30:00"),
+    ])
+    out, _ = apply_manual_punch_corrections(df, corrections)
+    manual = out[out["is_manual_correction"]].iloc[0]
+    assert manual["correction_action"] == "appended"  # NOT event_day_split
+    summary, _ = calculate_metrics(out, _single_schedules())
+    # No false event-day-split tag means normal absence semantics still apply.
+    ad = summary["absence_details"]
+    assert "event day" not in ad.iloc[0]["Absence Reason"].lower()
