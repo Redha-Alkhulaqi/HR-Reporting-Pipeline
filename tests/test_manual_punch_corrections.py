@@ -84,18 +84,44 @@ def test_non_camera_evidence_is_rejected():
     assert "evidence_type=email" in rejected.iloc[0]["rejection_reason"]
 
 
-def test_existing_punch_not_overwritten_by_default():
+def test_existing_punch_appended_alongside_by_default():
+    """Manual corrections APPEND by default -- they no longer reject
+    when a same-state punch already exists at a DIFFERENT time.
+    This is what unlocks split-shift second-interval corrections.
+    The previous "reject" guard is opt-in via allow_override=True
+    (where it becomes a REPLACE rather than a reject)."""
     df = pd.DataFrame([
         _punch(1003, "X", "08:30:00", "Check In"),   # already exists
         _punch(1003, "X", "17:00:00", "Check Out"),
     ])
     corrections = pd.DataFrame([_correction(corrected_time="08:00:00")])
     out, rejected = apply_manual_punch_corrections(df, corrections)
-    # Original 08:30 preserved, no insert, rejected with reason.
-    assert (out["Punch Time"] == "08:30:00").sum() == 1
+    # Both Check Ins now present; the manual one carries the audit
+    # flag so HR can trace it.
+    cis = out[out["Punch State"] == "Check In"]
+    assert sorted(cis["Punch Time"].tolist()) == ["08:00:00", "08:30:00"]
+    assert out["is_manual_correction"].sum() == 1
+    manual_row = out[out["is_manual_correction"]].iloc[0]
+    assert manual_row["Punch Time"] == "08:00:00"
+    assert manual_row["correction_action"] == "appended"
+    assert rejected.empty
+
+
+def test_exact_duplicate_correction_is_skipped_silently():
+    """If the manual correction matches an existing punch exactly
+    (same emp + date + state + time), the engine treats it as a
+    no-op re-import: not added, not raising, just listed in the
+    rejected sheet with reason='duplicate_already_recorded'."""
+    df = pd.DataFrame([
+        _punch(1003, "X", "08:30:00", "Check In"),
+    ])
+    corrections = pd.DataFrame([_correction(corrected_time="08:30:00")])
+    out, rejected = apply_manual_punch_corrections(df, corrections)
+    cis = out[out["Punch State"] == "Check In"]
+    assert len(cis) == 1            # not duplicated
     assert not out["is_manual_correction"].any()
     assert len(rejected) == 1
-    assert rejected.iloc[0]["rejection_reason"] == "existing_check_in_already_present"
+    assert rejected.iloc[0]["rejection_reason"] == "duplicate_already_recorded"
 
 
 def test_existing_punch_overwritten_when_allow_override():

@@ -11,12 +11,31 @@ Only corrections that are
 get applied. Everything else is returned in the rejected DataFrame so it
 can surface in an Exceptions & Manual Review view.
 
-Existing biometric punches are NEVER overwritten unless the caller flips
-ALLOW_OVERRIDE_EXISTING_PUNCH in config.
+Multi-interval (split-shift) attendance model
+---------------------------------------------
+Manual corrections APPEND new punches to the attendance frame by default.
+The downstream pipeline (daily aggregator, interval-aware overtime engine,
+absence engine, Employee Attendance audit sheet) already treats multiple
+Check Ins / Check Outs per (employee, date) as first-class data, so an
+employee who needs two pairs of punches in a split-shift day can have HR
+add the missing morning Check Out / evening Check In / evening Check Out
+without colliding with the existing morning Check In.
+
+Action semantics (recorded in the `correction_action` audit column):
+- "added"             : no existing same-state punch on that date; clean insert.
+- "appended"          : a same-state punch exists at a DIFFERENT time;
+                        the manual punch lands alongside it (the typical
+                        split-shift second-interval case).
+- "overridden"        : `ALLOW_OVERRIDE_EXISTING_PUNCH=true`, so the new
+                        punch REPLACES the existing same-state punch at
+                        a different time (legacy "wrong device punch" use
+                        case).
+- "duplicate_skipped" : the manual correction matches an existing punch
+                        exactly (same time + state); skipped silently.
 
 The module is import-safe: when the input file is missing the loader
 returns an empty schema and ``apply_manual_punch_corrections`` becomes a
-no-op that still adds the four audit columns to the attendance frame so
+no-op that still adds the audit columns to the attendance frame so
 downstream code can rely on them.
 """
 from datetime import datetime, time
@@ -41,6 +60,9 @@ _AUDIT_DEFAULTS = {
     "is_manual_correction": False,
     "correction_reason": "",
     "correction_verified_by": "",
+    # correction_action: "" for BioTime rows; otherwise one of
+    # "added" / "appended" / "overridden" (see module docstring).
+    "correction_action": "",
 }
 
 
@@ -115,6 +137,16 @@ def _existing_punch_mask(att_df, emp_id, date_str, punch_state):
     )
 
 
+def _exact_duplicate_mask(att_df, emp_id, date_str, punch_state, time_str):
+    """Detect a punch at the EXACT same emp + date + state + time. Used
+    to skip no-op re-imports without surfacing them as conflicts."""
+    same_state = _existing_punch_mask(att_df, emp_id, date_str, punch_state)
+    if not same_state.any():
+        return same_state
+    times = att_df["Punch Time"].astype(str)
+    return same_state & (times == time_str)
+
+
 def _empty_rejected():
     return pd.DataFrame(columns=list(REQUIRED_COLUMNS) + ["rejection_reason"])
 
@@ -184,19 +216,31 @@ def apply_manual_punch_corrections(attendance_df, corrections_df,
             continue
 
         state = _PUNCH_TYPE_TO_STATE[ptype]
-        existing = _existing_punch_mask(att, emp_id, date_str, state)
 
-        if existing.any():
-            if not allow_override:
-                rejected_rows.append(
-                    (row, f"existing_{ptype}_already_present")
-                )
-                continue
+        # 1) Exact duplicate (same emp + date + state + time) -> no-op.
+        # HR sometimes re-imports the same correction file; skipping
+        # these silently keeps the rejected sheet uncluttered.
+        if _exact_duplicate_mask(att, emp_id, date_str, state, time_str).any():
+            rejected_rows.append((row, "duplicate_already_recorded"))
+            continue
+
+        # 2) Same-state punch exists at a DIFFERENT time. Two intents
+        # are possible; the `allow_override` flag disambiguates:
+        #   - allow_override=True   -> legacy clobber semantics.
+        #     The existing same-state punch is REPLACED with the new
+        #     time. Use when HR is correcting a wrong device punch.
+        #   - allow_override=False  -> default APPEND semantics.
+        #     The manual punch lands ALONGSIDE the existing one. Split-
+        #     shift employees need this for their second-interval pair.
+        existing = _existing_punch_mask(att, emp_id, date_str, state)
+        if existing.any() and allow_override:
             overrides.append({
                 "mask": existing, "time": time_str,
                 "reason": reason_str, "verifier": verifier_str,
             })
             continue
+
+        action = "appended" if existing.any() else "added"
 
         emp_rows = att.loc[att["Employee ID"] == emp_id, "First Name"]
         first_name_val = emp_rows.iloc[0] if not emp_rows.empty else None
@@ -211,6 +255,7 @@ def apply_manual_punch_corrections(attendance_df, corrections_df,
             "is_manual_correction": True,
             "correction_reason": reason_str,
             "correction_verified_by": verifier_str,
+            "correction_action": action,
         })
 
     for ov in overrides:
@@ -219,6 +264,7 @@ def apply_manual_punch_corrections(attendance_df, corrections_df,
         att.loc[ov["mask"], "is_manual_correction"] = True
         att.loc[ov["mask"], "correction_reason"] = ov["reason"]
         att.loc[ov["mask"], "correction_verified_by"] = ov["verifier"]
+        att.loc[ov["mask"], "correction_action"] = "overridden"
 
     if inserts:
         att = pd.concat([att, pd.DataFrame(inserts)], ignore_index=True)
