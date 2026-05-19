@@ -343,6 +343,100 @@ def test_event_day_split_not_triggered_when_gap_too_wide():
     assert (manual["correction_action"] == "appended").all()
 
 
+def test_emp418_alias_plus_manual_canonical_merge_2026_05_04():
+    """Regression for the EMP418 reported case.
+
+    On 2026-05-04 BioTime captured punches under TWO different
+    Employee IDs (the legacy device ID 1027 was being retired in
+    favour of the canonical 4197471). HR then added a manual
+    correction for the missing evening Check In. The absence engine
+    MUST merge all sources under the canonical Employee ID and
+    classify the day as fully attended (0.0).
+
+    Sources of attendance on the day, after alias mapping + manual:
+      raw 1027 (aliased)        -> CIs 08:56 + 16:50, CO 13:00
+      raw 4197471 (canonical)   -> CO 21:01
+      manual (under 4197471)    -> CI 17:01
+
+    After alias_mapping(1027 -> 4197471):
+      Employee ID 4197471 holds 3 CIs (08:56, 16:50, 17:01)
+                                 + 2 COs (13:00, 21:01).
+
+    Schedule: split shift 09:00-13:00 morning + 17:00-21:00 evening.
+    Both intervals contain a Check In within their grace window, so
+    Absence Day Value MUST be 0.0 and the new audit columns must
+    record both source IDs + the merged total worked time.
+    """
+    from data_loader import apply_employee_id_aliases
+
+    raw = pd.DataFrame([
+        # BioTime under the legacy device ID 1027 (no name yet -- the
+        # canonical First Name is supplied via the alias map).
+        {"Employee ID": 1027, "First Name": None,
+         "Date": "2026-05-04", "Punch Time": "08:56:00",
+         "Punch State": "Check In"},
+        {"Employee ID": 1027, "First Name": None,
+         "Date": "2026-05-04", "Punch Time": "13:00:00",
+         "Punch State": "Check Out"},
+        {"Employee ID": 1027, "First Name": None,
+         "Date": "2026-05-04", "Punch Time": "16:50:00",
+         "Punch State": "Check In"},
+        # BioTime under the canonical Employee ID 4197471.
+        {"Employee ID": 4197471, "First Name": "MOHAMMED AJISH-EMP418",
+         "Date": "2026-05-04", "Punch Time": "21:01:00",
+         "Punch State": "Check Out"},
+    ])
+    aliases = pd.DataFrame([{
+        "Old Employee ID": 1027, "Current Employee ID": 4197471,
+        "Employee Name": "MOHAMMED AJISH-EMP418",
+    }])
+    schedules = pd.DataFrame([{
+        "Name": "MOHAMMED AJISH-EMP418",
+        "Working Time": "شفت صباحى (9:00AM-1:00PM) & شفت مسائى (5:00PM-9:00PM)",
+    }])
+    corrections = pd.DataFrame([
+        _correction(4197471, "2026-05-04", "check_in", "17:01:00",
+                    reason="نسي البصمة"),
+    ])
+
+    # Pipeline order: manual corrections first (so the new CI gets
+    # added under the canonical ID), THEN alias mapping (so the 1027
+    # rows fold under 4197471). Matches main.py.
+    df, rej = apply_manual_punch_corrections(raw, corrections)
+    assert rej.empty
+    df, _, _ = apply_employee_id_aliases(df, aliases, schedules)
+
+    summary, daily = calculate_metrics(
+        df, schedules,
+        period_start="2026-05-04", period_end="2026-05-04",
+    )
+
+    ad = summary["absence_details"]
+    row = ad[(ad["Employee ID"] == 4197471) & (ad["Date"] == "2026-05-04")].iloc[0]
+    assert row["Absence Day Value"] == 0.0
+    assert bool(row["Counted As Absence"]) is False
+    assert row["Attended Intervals"] == "09:00-13:00, 17:00-21:00"
+    assert row["Missed Intervals"] == ""
+
+    # Canonical-merge audit columns must surface BOTH raw IDs and
+    # both provenance buckets.
+    assert set(row["Raw Employee IDs"].split(", ")) == {"1027", "4197471"}
+    sources = row["Sources"]
+    assert "Aliased" in sources or "1027" in sources
+    assert "Manual correction" in sources
+    assert "BioTime" in sources or "Aliased" in sources  # 4197471's lone CO
+
+    # Total worked time -- chronological pairing across the merged
+    # punches: (08:56 -> 13:00) = 04:04, (16:50 -> 21:01) = 04:11.
+    # Sum = 08:15. The manual 17:01 CI is sandwiched while another
+    # CI is already open (16:50) so chronological pairing ignores it.
+    assert row["Total Worked"] == "08:15"
+    # And the Employee Summary contribution for this date is zero.
+    audit = summary["absence_audit"]
+    audit_row = audit[audit["Employee ID"] == 4197471].iloc[0]
+    assert audit_row["absence_days"] == 0.0
+
+
 def test_event_day_split_does_not_affect_normal_employees():
     """A single-shift employee with one CI + one CO never triggers
     the event-day-split pattern (HR would need to add a CI+CO pair

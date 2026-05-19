@@ -1260,6 +1260,16 @@ _ABSENCE_DETAILS_COLS = [
     "Scheduled Intervals", "Check-In Times",
     "Attended Intervals", "Missed Intervals",
     "Attended Day Value", "Absence Day Value",
+    # Canonical-identity merge audit columns. `Raw Employee IDs`
+    # exposes every pre-alias source ID that contributed punches
+    # for this canonical (Employee ID, Date) so HR can verify the
+    # absence engine merged alias-mapped + manual rows together.
+    # `Sources` documents the provenance bucket of each contributing
+    # row (BioTime, Manual correction, Aliased), and `Total Worked`
+    # is the sum of paired-interval minutes formatted HH:MM -- the
+    # same chronological pairing used by the Employee Attendance
+    # audit sheet.
+    "Raw Employee IDs", "Sources", "Total Worked",
 ]
 
 
@@ -1369,6 +1379,47 @@ def _build_weekly_off_lookup(weekly_off_df, df,
                 for matched_eid in name_to_ids[target]:
                     lookup[matched_eid] = days
     return lookup
+
+
+def _pair_intervals_chronologically(events):
+    """Walk (time_str, state) events in time order and pair Check Ins
+    with subsequent Check Outs. Returns the total worked minutes
+    summed across paired intervals.
+
+    Mirrors the chronological-pairing logic used by the Employee
+    Attendance audit sheet so the two views always agree on the
+    "total worked" figure.
+    """
+    if not events:
+        return 0
+    total = 0
+    open_ci_min = None
+    for time_str, state in sorted(events):
+        t_min = None
+        try:
+            parts = str(time_str).split(":")
+            t_min = int(parts[0]) * 60 + int(parts[1])
+        except (ValueError, AttributeError, IndexError):
+            continue
+        if state == "Check In":
+            if open_ci_min is None:
+                open_ci_min = t_min
+        elif state == "Check Out":
+            if open_ci_min is not None:
+                gap = t_min - open_ci_min
+                if gap < 0:
+                    gap += 24 * 60  # midnight wrap (defensive; rare)
+                total += gap
+                open_ci_min = None
+    return total
+
+
+def _format_minutes_as_hhmm(total_minutes):
+    """Render a minutes count as 'HH:MM' for HR display. Empty if <= 0."""
+    if total_minutes is None or total_minutes <= 0:
+        return ""
+    hours, minutes = divmod(int(total_minutes), 60)
+    return f"{hours:02d}:{minutes:02d}"
 
 
 def _classify_interval_attendance(check_in_time_strs, date_str, intervals,
@@ -1494,6 +1545,48 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         ].itertuples(index=False):
             key = (eid, str(date))
             check_ins_by_emp_date.setdefault(key, []).append(str(time))
+    # Canonical-identity merge audit: collect raw source IDs and
+    # provenance buckets per (canonical Employee ID, Date) so the
+    # Absence Details sheet can show which IDs were merged. The
+    # `original_employee_id` column is added by the alias-mapping
+    # pass; when absent, we fall back to the canonical ID (no alias
+    # was ever applied to this row).
+    raw_ids_by_emp_date = {}
+    sources_by_emp_date = {}
+    events_by_emp_date = {}
+    has_raw_id_col = "original_employee_id" in df_clean.columns
+    has_manual_col = "is_manual_correction" in df_clean.columns
+    has_action_col = "correction_action" in df_clean.columns
+    ci_co = df_clean[df_clean["Punch State"].isin(["Check In", "Check Out"])]
+    # iterrows is slow but column-name-stable; this loop runs once
+    # per attendance event, not per employee-day, so the cost is fine.
+    for _, r in ci_co.iterrows():
+        ceid = r["Employee ID"]
+        date_str = str(r["Date"])
+        key = (ceid, date_str)
+        raw_eid = r["original_employee_id"] if has_raw_id_col else ceid
+        try:
+            raw_eid_int = int(raw_eid) if pd.notna(raw_eid) else ceid
+        except (ValueError, TypeError):
+            raw_eid_int = raw_eid
+        raw_ids_by_emp_date.setdefault(key, set()).add(raw_eid_int)
+        events_by_emp_date.setdefault(key, []).append(
+            (str(r["Punch Time"]), r["Punch State"])
+        )
+        # Bucket the contributor source for HR readability.
+        action = (
+            str(r["correction_action"]) if has_action_col
+            and pd.notna(r.get("correction_action")) else ""
+        )
+        if action == "event_day_split":
+            source = "Event-day split (manual)"
+        elif has_manual_col and bool(r.get("is_manual_correction", False)):
+            source = "Manual correction"
+        elif has_raw_id_col and raw_eid_int != ceid:
+            source = f"Aliased ({raw_eid_int})"
+        else:
+            source = "BioTime"
+        sources_by_emp_date.setdefault(key, set()).add(source)
     # Per-(employee, date) flag: did HR explicitly mark this day as
     # an event-day continuous-attendance split? When yes the absence
     # engine treats the day as fully attended even when the split
@@ -1703,6 +1796,15 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             else:
                 reason = ""
 
+            # Canonical-identity merge audit fields.
+            key = (eid, date_str)
+            raw_ids = raw_ids_by_emp_date.get(key, set())
+            raw_ids_str = ", ".join(str(r) for r in sorted(raw_ids))
+            sources_str = "; ".join(sorted(sources_by_emp_date.get(key, set())))
+            events_for_day = events_by_emp_date.get(key, [])
+            total_worked_min = _pair_intervals_chronologically(events_for_day)
+            total_worked_str = _format_minutes_as_hhmm(total_worked_min)
+
             rows.append({
                 "Employee ID": eid,
                 "First Name": name,
@@ -1726,6 +1828,9 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 "Missed Intervals": ", ".join(missed_labels),
                 "Attended Day Value": round(attended_day_value, 2),
                 "Absence Day Value": round(absence_day_value, 2),
+                "Raw Employee IDs": raw_ids_str,
+                "Sources": sources_str,
+                "Total Worked": total_worked_str,
             })
     return pd.DataFrame(rows, columns=_ABSENCE_DETAILS_COLS)
 
