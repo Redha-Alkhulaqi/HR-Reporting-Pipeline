@@ -1004,17 +1004,26 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     # Early Leave sheet -- only rows where the employee genuinely left early.
     early_leave_rows = daily[daily.get("early_leave_status") == "Early Leave"]
     if not early_leave_rows.empty:
+        el_cols = [
+            "Employee ID", "First Name", "Date",
+            "Check In", "Check Out", "Shift Start", "Shift End",
+            "matched_shift_start", "matched_shift_end",
+            "matched_shift_label", "shift_intervals",
+            "matched_scheduled_minutes",
+            "early_leave_minutes", "early_leave_status",
+            "early_leave_anomaly", "early_leave_anomaly_reason",
+        ]
+        # Excused / unexcused early-leave columns are appended when
+        # _attach_excused_early_leave_info ran (which it does in the
+        # standard pipeline). HR uses these to see which portion of
+        # the gap was covered by an approved permission.
+        for extra in ("excused_early_leave_minutes",
+                      "unexcused_early_leave_minutes"):
+            if extra in early_leave_rows.columns:
+                el_cols.append(extra)
         _build_data_sheet(
             wb.create_sheet("Early Leave"),
-            early_leave_rows[[
-                "Employee ID", "First Name", "Date",
-                "Check In", "Check Out", "Shift Start", "Shift End",
-                "matched_shift_start", "matched_shift_end",
-                "matched_shift_label", "shift_intervals",
-                "matched_scheduled_minutes",
-                "early_leave_minutes", "early_leave_status",
-                "early_leave_anomaly", "early_leave_anomaly_reason",
-            ]],
+            early_leave_rows[el_cols],
         )
 
     excluded_summary = summary.get("excluded_employees_summary")

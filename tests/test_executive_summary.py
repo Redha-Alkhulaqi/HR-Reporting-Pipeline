@@ -160,6 +160,70 @@ def test_total_late_uses_unexcused_remainder_when_partial_excuse():
     assert row_exec["Total Late (Hours)"] == 0.3
 
 
+def test_total_early_leave_excludes_approved_excuse_minutes():
+    """Regression: Total Early Leave (Hours) must use UNEXCUSED
+    early-leave minutes. An approved-permission window that covers
+    the end of the day must zero out the early-leave count for that
+    day -- HR has explicitly signed off on the early departure.
+
+    Setup: employee scheduled 08:00 -> 17:00. Arrives 08:00 on time
+    but leaves at 15:30 (90 min early). HR has an approved 90-min
+    permission covering 15:30 - 17:00. Daily row still says
+    early_leave_status='Early Leave' (raw gap), but the executive
+    Total Early Leave must respect the permission and count 0.
+    """
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-04", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-04", "15:30:00", "Check Out"),
+    ])
+    time_off = pd.DataFrame([{
+        "Employee": "ALI-EMP1",
+        "Time Off Type": "استأذان -",
+        "Start Date": "2026-05-04 15:30:00",
+        "End Date":   "2026-05-04 17:00:00",
+        "Status": "Approved",
+    }])
+    summary, daily = calculate_metrics(df, _schedules(), time_off)
+    row_daily = daily.iloc[0]
+    # The raw gap is still 90 min and the per-row status is still
+    # "Early Leave" -- the audit trail stays visible.
+    assert row_daily["early_leave_minutes"] == 90
+    # But the new excused/unexcused split absorbs the permission.
+    assert row_daily["excused_early_leave_minutes"] == 90
+    assert row_daily["unexcused_early_leave_minutes"] == 0
+    # Executive summary contributes 0 hours.
+    row_exec = summary["executive_employee_summary"].iloc[0]
+    assert row_exec["Total Early Leave (Hours)"] == 0.0
+
+
+def test_total_early_leave_uses_unexcused_remainder_when_partial_excuse():
+    """If an approved permission covers only PART of the early gap,
+    the executive Total Early Leave must count the unexcused remainder
+    (subject to the 5-min grace)."""
+    # 90 min raw gap (16:00 shift end at 17:30 actually... let's
+    # use 08:00 -> 17:00 schedule; leave at 15:30 -> 90 min raw.
+    # Permission covers 16:00 - 17:00 (last 60 min). Unexcused = 30.
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-04", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-04", "15:30:00", "Check Out"),
+    ])
+    time_off = pd.DataFrame([{
+        "Employee": "ALI-EMP1",
+        "Time Off Type": "استأذان -",
+        "Start Date": "2026-05-04 16:00:00",
+        "End Date":   "2026-05-04 17:00:00",
+        "Status": "Approved",
+    }])
+    summary, daily = calculate_metrics(df, _schedules(), time_off)
+    row_daily = daily.iloc[0]
+    assert row_daily["early_leave_minutes"] == 90
+    assert row_daily["excused_early_leave_minutes"] == 60
+    assert row_daily["unexcused_early_leave_minutes"] == 30
+    # 30 min > 5-min grace -> count full 30. 30/60 = 0.5.
+    row_exec = summary["executive_employee_summary"].iloc[0]
+    assert row_exec["Total Early Leave (Hours)"] == 0.5
+
+
 def test_early_leave_under_5min_grace_counts_zero():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),

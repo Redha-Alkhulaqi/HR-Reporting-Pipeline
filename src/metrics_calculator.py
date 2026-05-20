@@ -1262,6 +1262,89 @@ def _apply_overtime_payroll_adjustment(daily, multiplier=OVERTIME_PAY_MULTIPLIER
     return daily
 
 
+def _attach_excused_early_leave_info(daily, time_off_df):
+    """Compute excused / unexcused early leave per row.
+
+    Mirrors the late-excuse logic in `_classify_row` for symmetry:
+    an approved hourly permission (استئذان) whose window overlaps
+    the early-leave gap (Check Out -> matched Shift End) excuses
+    that overlap. The downstream executive Total Early Leave then
+    counts only the UNEXCUSED portion.
+
+    Adds two columns to `daily`:
+      excused_early_leave_minutes  -- overlap (minutes) between any
+                                      approved permission and the
+                                      (CO -> matched Shift End) gap
+      unexcused_early_leave_minutes -- raw early_leave_minutes -
+                                       excused; this is what HR
+                                       should count toward Total
+                                       Early Leave for payroll.
+
+    Time-off matching uses the same robust EMP-code / normalized-name
+    resolver as the late path, so a name mismatch between the
+    `hr.leave` Employee column and the attendance First Name doesn't
+    silently drop the permission.
+    """
+    if "early_leave_minutes" not in daily.columns:
+        return daily
+
+    # Build canonical Employee ID -> name index from `daily`.
+    emp_to_name = {}
+    if "First Name" in daily.columns:
+        for eid, sub in daily.groupby("Employee ID"):
+            names = sub["First Name"].dropna().astype(str).str.strip()
+            names = names[names != ""]
+            if not names.empty:
+                emp_to_name[eid] = names.iloc[0]
+    approved_leaves_by_id = _build_approved_leaves_by_id(
+        time_off_df, emp_to_name,
+    )
+
+    def _raw_gap_min(row):
+        # Compute the raw (CO -> matched Shift End) gap from datetime
+        # columns. Independent of the row-level EARLY_LEAVE_GRACE
+        # threshold so the executive view can apply its OWN grace
+        # against the un-graced gap (preserving the previous
+        # behaviour of the executive late/early calc).
+        if not row.get("has_check_out", False):
+            return 0
+        se = row.get("Shift End DateTime")
+        co = row.get("Check Out DateTime")
+        if pd.isna(se) or pd.isna(co):
+            return 0
+        return max(0, int((se - co).total_seconds() / 60))
+
+    def _compute_excused(row):
+        gap = _raw_gap_min(row)
+        if gap <= 0:
+            return 0
+        co_dt = row.get("Check Out DateTime")
+        se_dt = row.get("Shift End DateTime")
+        leaves = approved_leaves_by_id.get(row["Employee ID"], ())
+        if not leaves:
+            return 0
+        excused = 0
+        for start, end, _type, is_excuse in leaves:
+            if not is_excuse:
+                continue
+            overlap_start = max(co_dt, start)
+            overlap_end = min(se_dt, end)
+            if overlap_end > overlap_start:
+                excused += int(
+                    (overlap_end - overlap_start).total_seconds() / 60
+                )
+        return min(excused, gap)
+
+    raw_gap = daily.apply(_raw_gap_min, axis=1).astype(int)
+    excused_el = daily.apply(_compute_excused, axis=1).astype(int)
+    # excused cannot exceed the raw gap (the function already caps it,
+    # but the .clip below is defensive).
+    excused_el = excused_el.clip(upper=raw_gap)
+    daily["excused_early_leave_minutes"] = excused_el
+    daily["unexcused_early_leave_minutes"] = (raw_gap - excused_el).clip(lower=0)
+    return daily
+
+
 def _attach_department(daily, df):
     """Map a Department column onto daily when source data exposes one."""
     dept_col = _find_column(df, _DEPARTMENT_COL_CANDIDATES)
@@ -2206,21 +2289,33 @@ def _build_executive_employee_summary(daily, absence_by_id,
         unexcused_delay > _EXEC_LATE_GRACE_MINUTES, 0,
     )
 
-    # Raw early-leave gap = matched Shift End - Check Out (clamped >= 0).
-    # We use the datetime columns so split-shift matching is honored.
-    def _raw_early(row):
-        if not row["has_check_out"]:
-            return 0
-        se = row.get("Shift End DateTime")
-        co = row.get("Check Out DateTime")
-        if pd.isna(se) or pd.isna(co):
-            return 0
-        gap = int((se - co).total_seconds() / 60)
-        return max(0, gap)
-
-    raw_early = visible.apply(_raw_early, axis=1)
-    work["_early_leave_min"] = raw_early.where(
-        raw_early > _EXEC_EARLY_LEAVE_GRACE_MINUTES, 0
+    # Total Early Leave uses UNEXCUSED minutes -- the part of the
+    # gap NOT covered by an approved hourly permission (استئذان).
+    # HR-approved permissions covering the end of the day must NOT
+    # inflate the early-leave hours. Apply the executive grace
+    # threshold to the unexcused portion so a 90-min early departure
+    # fully covered by an approved 90-min permission contributes 0
+    # (not 90) to Total Early Leave.
+    if "unexcused_early_leave_minutes" in visible.columns:
+        unexcused_el = (
+            visible["unexcused_early_leave_minutes"]
+            .fillna(0).clip(lower=0).astype(int)
+        )
+    else:
+        # Defensive fallback: derive the raw gap directly from the
+        # datetime columns when the new column is absent (older
+        # daily snapshots).
+        def _raw_early(row):
+            if not row.get("has_check_out"):
+                return 0
+            se = row.get("Shift End DateTime")
+            co = row.get("Check Out DateTime")
+            if pd.isna(se) or pd.isna(co):
+                return 0
+            return max(0, int((se - co).total_seconds() / 60))
+        unexcused_el = visible.apply(_raw_early, axis=1)
+    work["_early_leave_min"] = unexcused_el.where(
+        unexcused_el > _EXEC_EARLY_LEAVE_GRACE_MINUTES, 0,
     )
 
     work["_overtime_min"] = visible["overtime_minutes"].astype(int)
@@ -3141,6 +3236,11 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     # uniformly to every row AFTER classification, so the multiplier is
     # never duplicated inside individual policy branches.
     daily = _apply_overtime_payroll_adjustment(daily)
+    # Symmetric to the late-excuse path: an approved hourly permission
+    # that overlaps the early-leave gap reduces the unexcused early
+    # leave. The executive Total Early Leave (Hours) consumes only
+    # the unexcused portion.
+    daily = _attach_excused_early_leave_info(daily, time_off_df)
     daily = _attach_department(daily, df)
     # Break info is INFORMATIONAL only -- attached before the
     # exclusion pass and never consumed by any downstream KPI.
