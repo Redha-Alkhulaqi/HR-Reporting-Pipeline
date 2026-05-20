@@ -2193,8 +2193,18 @@ def _build_executive_employee_summary(daily, absence_by_id,
         "First Name": visible["First Name"],
     })
 
-    raw_delay = visible["Delay Minutes"].clip(lower=0).astype(int)
-    work["_late_min"] = raw_delay.where(raw_delay > _EXEC_LATE_GRACE_MINUTES, 0)
+    # Total Late uses UNEXCUSED minutes -- the part of the delay
+    # that wasn't covered by an approved hourly permission slip
+    # (استئذان). HR-approved excuses must NOT inflate the late
+    # hours. Apply the executive grace threshold to the unexcused
+    # portion so a day with raw delay 94 min but a 90-min approved
+    # permission contributes 0 (not 94) to Total Late.
+    unexcused_delay = (
+        visible["unexcused_delay_minutes"].clip(lower=0).astype(int)
+    )
+    work["_late_min"] = unexcused_delay.where(
+        unexcused_delay > _EXEC_LATE_GRACE_MINUTES, 0,
+    )
 
     # Raw early-leave gap = matched Shift End - Check Out (clamped >= 0).
     # We use the datetime columns so split-shift matching is honored.

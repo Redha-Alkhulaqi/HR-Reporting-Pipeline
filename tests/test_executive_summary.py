@@ -103,6 +103,63 @@ def test_late_above_grace_counts_full_minutes_in_hours():
     assert row["Total Late (Hours)"] == 0.3
 
 
+def test_total_late_excludes_approved_excuse_minutes():
+    """Regression: Total Late (Hours) must use UNEXCUSED delay, NOT
+    raw delay. An approved-permission day where HR has signed off
+    on the late arrival must contribute 0 hours to Total Late.
+
+    Setup: employee scheduled 08:00, arrives 09:30 (90 min raw
+    delay). HR has an approved 90-minute permission (استئذان)
+    covering 08:00 - 09:30. Daily classifier marks the row as
+    Approved Excuse, unexcused_delay_minutes=0. Executive summary
+    must respect that.
+    """
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-04", "09:30:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-04", "17:00:00", "Check Out"),
+    ])
+    time_off = pd.DataFrame([{
+        "Employee": "ALI-EMP1",
+        "Time Off Type": "استأذان -",
+        "Start Date": "2026-05-04 08:00:00",
+        "End Date":   "2026-05-04 09:30:00",
+        "Status": "Approved",
+    }])
+    summary, daily = calculate_metrics(df, _schedules(), time_off)
+    # Sanity: the daily row is Approved Excuse, not Late.
+    row_daily = daily.iloc[0]
+    assert row_daily["attendance_status"] == "Approved Excuse"
+    assert row_daily["unexcused_delay_minutes"] == 0
+    # Executive Summary Total Late MUST be 0 -- the day is excused.
+    row_exec = summary["executive_employee_summary"].iloc[0]
+    assert row_exec["Total Late (Hours)"] == 0.0
+
+
+def test_total_late_uses_unexcused_remainder_when_partial_excuse():
+    """If an approved permission covers only PART of the delay, the
+    executive Total Late must count the unexcused remainder (with
+    the 15-min grace applied to the remainder, not the raw delay)."""
+    # 60 min raw delay (08:00 shift, 09:00 check-in). HR approves
+    # a 40-min permission covering 08:00-08:40. Unexcused = 20 min.
+    df = pd.DataFrame([
+        _punch(1, "ALI-EMP1", "2026-05-04", "09:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-04", "17:00:00", "Check Out"),
+    ])
+    time_off = pd.DataFrame([{
+        "Employee": "ALI-EMP1",
+        "Time Off Type": "استأذان -",
+        "Start Date": "2026-05-04 08:00:00",
+        "End Date":   "2026-05-04 08:40:00",
+        "Status": "Approved",
+    }])
+    summary, daily = calculate_metrics(df, _schedules(), time_off)
+    row_daily = daily.iloc[0]
+    assert row_daily["unexcused_delay_minutes"] == 20
+    # 20 unexcused > 15 grace -> count full 20 min. 20/60 ~= 0.33 -> 0.3 hrs.
+    row_exec = summary["executive_employee_summary"].iloc[0]
+    assert row_exec["Total Late (Hours)"] == 0.3
+
+
 def test_early_leave_under_5min_grace_counts_zero():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
