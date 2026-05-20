@@ -337,7 +337,6 @@ def build_employee_attendance_rows(raw_punches, schedules_df):
         )
         paired_intervals = []
         open_ci = None
-        latest_co = None
         for time_str, state in events:
             if _time_str_to_minutes(time_str) is None:
                 continue
@@ -350,40 +349,42 @@ def build_employee_attendance_rows(raw_punches, schedules_df):
                 if open_ci is not None:
                     paired_intervals.append((open_ci, time_str))
                     open_ci = None
-                latest_co = time_str  # capture for display even if unpaired
 
         # Column-placement strategy:
-        # - 2+ paired intervals: chronological order (Shift 1 = first,
-        #   Shift 2 = second). Supports event-day splits and any other
-        #   case where the boundary doesn't fall at the schedule's
-        #   static midpoint.
-        # - exactly 1 paired interval: route by the schedule's static
-        #   midpoint so a partial-day row still shows morning-only in
-        #   Shift 1 OR evening-only in Shift 2 (preserves the previous
-        #   audit semantic for split-shift partial attendance).
+        # - 2+ chronological pairs AND schedule has 2+ intervals
+        #   -> chronological order (Shift 1 = first paired, Shift 2 =
+        #   second). Supports event-day splits where the boundary
+        #   doesn't fall at the schedule's static midpoint.
+        # - Otherwise -> boundary-based slot placement. Each event is
+        #   bucketed into Shift 1 / Shift 2 by its time-of-day. This
+        #   guarantees that unpaired CIs/COs (e.g. when a raw-ID row
+        #   contributes only Check-Ins and the canonical Check-Outs
+        #   live in a separate raw-ID row) still appear in their
+        #   natural slots instead of disappearing from the audit.
+        intervals = intervals_by_name.get(canonical_name) or []
+        boundary_min = _shift_split_boundary(intervals)
         s1_ci, s1_co, s2_ci, s2_co = "", "", "", ""
-        if len(paired_intervals) >= 2:
+        if len(paired_intervals) >= 2 and len(intervals) >= 2:
             s1_ci, s1_co = paired_intervals[0]
             s2_ci, s2_co = paired_intervals[1]
-        elif len(paired_intervals) == 1:
-            intervals = intervals_by_name.get(canonical_name) or []
-            boundary_min = _shift_split_boundary(intervals)
-            ci_only, co_only = paired_intervals[0]
-            ci_min = _time_str_to_minutes(ci_only)
-            if (boundary_min is not None and ci_min is not None
-                    and ci_min >= boundary_min):
-                s2_ci, s2_co = ci_only, co_only
-            else:
-                s1_ci, s1_co = ci_only, co_only
-
-        # If the final Check Out is later than the paired close (i.e.
-        # the device sent a duplicate Check Out a second later), prefer
-        # the LATER time for HR display -- they want to see when the
-        # employee actually left, not the millisecond-earlier reading.
-        if s2_co and latest_co and latest_co > s2_co:
-            s2_co = latest_co
-        elif s1_co and not s2_co and latest_co and latest_co > s1_co:
-            s1_co = latest_co
+        else:
+            s1_cis, s1_cos, s2_cis, s2_cos = [], [], [], []
+            for time_str, state in events:
+                t_min = _time_str_to_minutes(time_str)
+                if t_min is None:
+                    continue
+                if boundary_min is None or t_min < boundary_min:
+                    ci_b, co_b = s1_cis, s1_cos
+                else:
+                    ci_b, co_b = s2_cis, s2_cos
+                if state == "Check In":
+                    ci_b.append(time_str)
+                elif state == "Check Out":
+                    co_b.append(time_str)
+            s1_ci = min(s1_cis) if s1_cis else ""
+            s1_co = max(s1_cos) if s1_cos else ""
+            s2_ci = min(s2_cis) if s2_cis else ""
+            s2_co = max(s2_cos) if s2_cos else ""
 
         total_min = 0
         for ci_str, co_str in ((s1_ci, s1_co), (s2_ci, s2_co)):
