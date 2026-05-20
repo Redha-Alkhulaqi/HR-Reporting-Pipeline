@@ -475,10 +475,10 @@ def _build_employee_attendance_sheet(ws, df):
 def _build_executive_employee_sheet(ws, df):
     """Render the simplified executive Employee Summary sheet.
 
-    12 columns expected (in this exact order):
+    14 columns expected (in this exact order):
         1.  Employee ID
         2.  First Name
-        3.  No of Absence Days
+        3.  No of Absence Days       (reduced by Friday compensation)
         4.  No of Permission Days
         5.  No of Vacation Days
         6.  No of Secondment Days
@@ -488,6 +488,8 @@ def _build_executive_employee_sheet(ws, df):
         10. Total Early Leave (Hours)
         11. Break Time (Hours)
         12. Break Time (After Policy)
+        13. Friday Compensation Days  (Gaming Friday Compensation)
+        14. Friday Worked Dates       (audit list of paired Fridays)
 
     Apply executive-friendly formatting: bold header, frozen header,
     auto-filter, centered numeric cells, thousands separator on
@@ -514,13 +516,14 @@ def _build_executive_employee_sheet(ws, df):
         return
 
     # Integer columns: Employee ID (1) plus the three whole-day-count
-    # columns (4 Permission, 5 Vacation, 6 Secondment). Absence (col 3)
-    # is rendered at 1 decimal because split-shift partial-attendance
+    # columns (4 Permission, 5 Vacation, 6 Secondment) and the Gaming
+    # Friday Compensation Days column (13). Absence (col 3) is
+    # rendered at 1 decimal because split-shift partial-attendance
     # days contribute fractional (e.g. 0.5) values to it.
     _format_numeric_cells(
         ws,
         rows=range(2, data_end_row + 1),
-        cols=[1, 4, 5, 6],
+        cols=[1, 4, 5, 6, 13],
         number_format="#,##0",
     )
     # 1-decimal columns: 3 Absence (fractional for split-shift),

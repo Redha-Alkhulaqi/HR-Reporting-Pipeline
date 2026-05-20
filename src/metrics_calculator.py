@@ -1469,6 +1469,11 @@ _ABSENCE_DETAILS_COLS = [
     # same chronological pairing used by the Employee Attendance
     # audit sheet.
     "Raw Employee IDs", "Sources", "Total Worked",
+    # Gaming Friday Compensation audit -- True when the day's
+    # original absence was zeroed out by a paired worked Friday in
+    # the same reporting period. The Absence Reason is rewritten to
+    # cite the compensating Friday date so HR can trace the swap.
+    "Friday Compensation",
 ]
 
 
@@ -2090,8 +2095,137 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                 "Raw Employee IDs": raw_ids_str,
                 "Sources": sources_str,
                 "Total Worked": total_worked_str,
+                "Friday Compensation": False,
             })
     return pd.DataFrame(rows, columns=_ABSENCE_DETAILS_COLS)
+
+
+def _apply_gaming_friday_compensation(absence_details):
+    """Gaming Friday Compensation rule.
+
+    Some employees (e.g. the Gaming showroom team) work on Fridays
+    even though Friday is the official weekly off. In exchange, the
+    employee takes one compensation day off during the work-week.
+    The rule formalises that swap: a non-Friday absence is cancelled
+    out by a worked Friday in the same reporting period.
+
+    Formula (per employee, per reporting period):
+        compensation_days = min(worked_friday_count,
+                                 weekday_absence_day_total)
+
+    Implementation:
+    - Walks each employee's absence-detail rows.
+    - Identifies worked Fridays = rows with Weekday == 'Friday' AND
+      Has Attendance == True. Excluded employees and Friday-on-
+      holiday rows are skipped.
+    - Identifies eligible weekday absences = rows with
+      Absence Day Value > 0 AND Weekday != 'Friday'. (Vacation,
+      permission, secondment, and excluded rows already carry
+      Absence Day Value = 0, so they're untouched by construction.)
+    - Walks weekday-absence rows in date order and applies the
+      compensation budget. Each compensated row gets:
+        * Absence Day Value -> 0 (or reduced by partial budget)
+        * Counted As Absence -> False once fully compensated
+        * Friday Compensation -> True
+        * Absence Reason rewritten to cite the paired Friday date.
+
+    Returns
+        (absence_details, friday_comp_by_id, friday_dates_by_id,
+         log_messages)
+    where the dicts map canonical Employee ID to compensation day
+    count and to a comma-separated string of worked Friday dates,
+    and `log_messages` is a list of strings ready for the pipeline
+    log surface.
+    """
+    if absence_details is None or absence_details.empty:
+        return absence_details, {}, {}, []
+
+    friday_comp_by_id = {}
+    friday_dates_by_id = {}
+    log_messages = []
+
+    # iterrows is slow but column-name-stable; the rule runs once
+    # per reporting period and is O(employees * days) which is small.
+    for eid, group in absence_details.groupby("Employee ID", sort=False):
+        if group["Is Excluded"].any():
+            # An excluded employee carries Is Excluded=True on every
+            # row. Skip compensation entirely; their absence is
+            # already not counted toward any KPI.
+            if bool(group["Is Excluded"].iloc[0]):
+                continue
+        worked_fri_dates = []
+        for _, r in group.iterrows():
+            if (r["Weekday"] == "Friday"
+                    and bool(r["Has Attendance"])
+                    and not bool(r["Is Holiday"])):
+                worked_fri_dates.append(str(r["Date"]))
+        worked_fri_dates.sort()
+        if not worked_fri_dates:
+            continue
+
+        weekday_absences = group[
+            (group["Weekday"] != "Friday")
+            & (group["Absence Day Value"].astype(float) > 0)
+        ].sort_values("Date")
+        if weekday_absences.empty:
+            continue
+
+        total_absence = float(weekday_absences["Absence Day Value"].sum())
+        budget = float(min(len(worked_fri_dates), total_absence))
+        if budget <= 0:
+            continue
+
+        compensated_dates = []
+        remaining = budget
+        for idx in weekday_absences.index:
+            if remaining <= 0:
+                break
+            current = float(absence_details.at[idx, "Absence Day Value"])
+            take = min(current, remaining)
+            new_val = round(current - take, 2)
+            absence_details.at[idx, "Absence Day Value"] = new_val
+            # Re-balance the matching Attended Day Value so the per-
+            # day audit still sums to scheduled = attended + leaves
+            # + absence. The compensated portion moves out of
+            # absence; nothing else changes.
+            current_att = float(
+                absence_details.at[idx, "Attended Day Value"]
+            )
+            absence_details.at[idx, "Attended Day Value"] = round(
+                current_att + take, 2,
+            )
+            absence_details.at[idx, "Friday Compensation"] = True
+            if new_val <= 0:
+                absence_details.at[idx, "Counted As Absence"] = False
+            paired_friday = (
+                worked_fri_dates[len(compensated_dates)]
+                if len(compensated_dates) < len(worked_fri_dates)
+                else worked_fri_dates[-1]
+            )
+            absence_details.at[idx, "Absence Reason"] = (
+                f"Gaming Friday Compensation -- offset by worked "
+                f"Friday {paired_friday}"
+            )
+            compensated_dates.append(str(absence_details.at[idx, "Date"]))
+            log_messages.append(
+                f"Friday compensation: employee_id={eid} "
+                f"compensated_absence_date={absence_details.at[idx, 'Date']} "
+                f"friday_worked_date={paired_friday}"
+            )
+            remaining -= take
+
+        # The compensation count is the SUM of absence-value moved
+        # (handles fractional split-shift absences correctly).
+        comp_int = int(round(budget - remaining))
+        # Cap by the number of worked Fridays consumed -- we never
+        # pay out more compensation days than Fridays the employee
+        # actually showed up for.
+        comp_int = min(comp_int, len(worked_fri_dates))
+        if comp_int > 0:
+            friday_comp_by_id[eid] = comp_int
+            friday_dates_by_id[eid] = ", ".join(worked_fri_dates[:comp_int])
+
+    return absence_details, friday_comp_by_id, friday_dates_by_id, log_messages
 
 
 _ABSENCE_AUDIT_COLS = [
@@ -2099,11 +2233,19 @@ _ABSENCE_AUDIT_COLS = [
     "weekly_off_days", "scheduled_weekdays",
     "scheduled_working_days", "attended_days",
     "permission_days", "vacation_days", "secondment_days",
-    "absence_days", "reconciliation_delta",
+    "absence_days",
+    # Gaming Friday Compensation -- per-employee count and the
+    # worked Friday dates that produced it. Surfaces on the
+    # Employee Summary executive view as a parallel column so the
+    # absence reduction is auditable at a glance.
+    "friday_compensation_days", "friday_worked_dates",
+    "reconciliation_delta",
 ]
 
 
-def _build_absence_audit(absence_details):
+def _build_absence_audit(absence_details,
+                          friday_comp_by_id=None,
+                          friday_dates_by_id=None):
     """Per-employee audit totals derived from Absence Details.
 
     For each non-excluded employee:
@@ -2186,6 +2328,20 @@ def _build_absence_audit(absence_details):
         return ",".join(d for d in _VALID_WEEKDAYS if d not in off)
 
     grp["scheduled_weekdays"] = grp["weekly_off_days"].apply(_complement_weekdays)
+
+    # Gaming Friday Compensation surface -- per-employee count and
+    # the worked Friday dates that produced it.
+    if friday_comp_by_id is None:
+        friday_comp_by_id = {}
+    if friday_dates_by_id is None:
+        friday_dates_by_id = {}
+    grp["friday_compensation_days"] = (
+        grp["Employee ID"].map(friday_comp_by_id).fillna(0).astype(int)
+    )
+    grp["friday_worked_dates"] = (
+        grp["Employee ID"].map(friday_dates_by_id).fillna("")
+    )
+
     return grp[_ABSENCE_AUDIT_COLS].sort_values(
         by=["reconciliation_delta", "absence_days", "First Name"],
         ascending=[False, False, True],
@@ -2227,13 +2383,21 @@ _EXECUTIVE_SUMMARY_COLUMNS = [
     "Total Over Time (Payable 1.5x) (Hours)",
     "Total Early Leave (Hours)",
     "Break Time (Hours)", "Break Time (After Policy)",
+    # Gaming Friday Compensation -- count of weekday absences
+    # cancelled out by worked Fridays, plus the audit list of which
+    # Fridays were worked. Appended after the existing 12 columns
+    # so prior schema consumers can still address cols 1-12 by
+    # position.
+    "Friday Compensation Days", "Friday Worked Dates",
 ]
 
 
 def _build_executive_employee_summary(daily, absence_by_id,
                                       permission_by_id, vacation_by_id,
-                                      secondment_by_id):
-    """Build the 12-column executive view of per-employee totals.
+                                      secondment_by_id,
+                                      friday_comp_by_id=None,
+                                      friday_dates_by_id=None):
+    """Build the 14-column executive view of per-employee totals.
 
     Columns (exact names, in order):
       Employee ID, First Name,
@@ -2383,6 +2547,18 @@ def _build_executive_employee_summary(daily, absence_by_id,
     grp["Total Early Leave (Hours)"] = (grp["early_leave_min"] / 60).round(1)
     grp["Break Time (Hours)"] = (grp["break_min"] / 60).round(1)
     grp["Break Time (After Policy)"] = (grp["break_after_policy_min"] / 60).round(1)
+    # Gaming Friday Compensation columns. The absence count in
+    # column 3 has already been reduced by `compensation_days` via
+    # the upstream absence-details pass; these two columns expose
+    # the swap so HR can audit it.
+    friday_comp_by_id = friday_comp_by_id or {}
+    friday_dates_by_id = friday_dates_by_id or {}
+    grp["Friday Compensation Days"] = (
+        grp["Employee ID"].map(friday_comp_by_id).fillna(0).astype(int)
+    )
+    grp["Friday Worked Dates"] = (
+        grp["Employee ID"].map(friday_dates_by_id).fillna("")
+    )
 
     return (
         grp[cols]
@@ -3304,7 +3480,20 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         schedule_lookup=schedule_lookup,
         intervals_lookup=intervals_lookup,
     )
-    absence_audit = _build_absence_audit(absence_details)
+    # Gaming Friday Compensation -- mutates absence_details rows
+    # (reduces Absence Day Value, sets Friday Compensation flag,
+    # rewrites Absence Reason). Runs BEFORE the audit aggregator
+    # so the per-employee absence_days figure already reflects the
+    # compensation swap.
+    (absence_details, friday_comp_by_id, friday_dates_by_id,
+     friday_compensation_log) = _apply_gaming_friday_compensation(
+        absence_details,
+    )
+    absence_audit = _build_absence_audit(
+        absence_details,
+        friday_comp_by_id=friday_comp_by_id,
+        friday_dates_by_id=friday_dates_by_id,
+    )
     (absence_by_id, permission_by_id,
      vacation_by_id, secondment_by_id) = _category_counts_from_audit(absence_audit)
 
@@ -3328,6 +3517,8 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
     executive_employee_summary = _build_executive_employee_summary(
         daily, absence_by_id,
         permission_by_id, vacation_by_id, secondment_by_id,
+        friday_comp_by_id=friday_comp_by_id,
+        friday_dates_by_id=friday_dates_by_id,
     )
 
     # Break aggregates -- purely informational, no exclusion gating.
@@ -3459,6 +3650,13 @@ def calculate_metrics(df, schedules_df, time_off_df=None, excluded_df=None,
         "absence_details": absence_details,
         "absence_audit": absence_audit,
         "absence_audit_breaks": audit_breaks,
+        "friday_compensation_log": friday_compensation_log,
+        "friday_compensation_employee_count": int(
+            sum(1 for v in friday_comp_by_id.values() if v > 0)
+        ),
+        "friday_compensation_total_days": int(
+            sum(friday_comp_by_id.values())
+        ),
         "excluded_employees_summary": excluded_employees_summary,
         "alias_audit": (
             alias_audit if alias_audit is not None else pd.DataFrame()

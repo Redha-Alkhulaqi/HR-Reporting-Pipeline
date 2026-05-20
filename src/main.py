@@ -267,6 +267,15 @@ def main(argv=None):
         )
         for warn in summary.get("absence_audit_breaks", []):
             logger.warning(f"Absence audit reconciliation break: {warn}")
+        for msg in summary.get("friday_compensation_log", []):
+            logger.info(msg)
+        fc_emp = summary.get("friday_compensation_employee_count", 0)
+        fc_days = summary.get("friday_compensation_total_days", 0)
+        if fc_emp:
+            logger.info(
+                f"Gaming Friday Compensation: {fc_emp} employee(s), "
+                f"{fc_days} weekday absence day(s) compensated by worked Fridays."
+            )
 
         # Build the REPORT view -- by default we hide excluded employees
         # from every exported sheet and from the Claude markdown. The

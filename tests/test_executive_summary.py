@@ -12,6 +12,8 @@ EXECUTIVE_COLUMNS = [
     "Total Over Time (Payable 1.5x) (Hours)",
     "Total Early Leave (Hours)",
     "Break Time (Hours)", "Break Time (After Policy)",
+    # Gaming Friday Compensation columns appended in this release.
+    "Friday Compensation Days", "Friday Worked Dates",
 ]
 
 
@@ -26,7 +28,7 @@ def _punch(employee_id, name, date, time, state):
     }
 
 
-def test_executive_summary_has_exact_12_columns():
+def test_executive_summary_has_exact_14_columns():
     df = pd.DataFrame([
         _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
         _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
@@ -273,17 +275,20 @@ def test_break_under_60_minutes_has_zero_after_policy():
 
 
 def test_absence_days_counts_working_days_employee_missed():
-    # Two employees over three "working" days. ALI checks in only
-    # on day 1; ZAIN works all three. Absence for ALI = 2.
+    # Two employees over three "working" days starting Saturday so
+    # NO Friday lands in the period (avoids triggering the Gaming
+    # Friday Compensation rule which would otherwise offset ALI's
+    # absence by one day). ALI checks in only on day 1; ZAIN works
+    # all three. Absence for ALI = 2.
     df = pd.DataFrame([
-        _punch(1, "ALI-EMP1", "2026-05-01", "08:00:00", "Check In"),
-        _punch(1, "ALI-EMP1", "2026-05-01", "17:00:00", "Check Out"),
-        _punch(2, "ZAIN-EMP2", "2026-05-01", "08:00:00", "Check In"),
-        _punch(2, "ZAIN-EMP2", "2026-05-01", "17:00:00", "Check Out"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "08:00:00", "Check In"),
+        _punch(1, "ALI-EMP1", "2026-05-02", "17:00:00", "Check Out"),
         _punch(2, "ZAIN-EMP2", "2026-05-02", "08:00:00", "Check In"),
         _punch(2, "ZAIN-EMP2", "2026-05-02", "17:00:00", "Check Out"),
         _punch(2, "ZAIN-EMP2", "2026-05-03", "08:00:00", "Check In"),
         _punch(2, "ZAIN-EMP2", "2026-05-03", "17:00:00", "Check Out"),
+        _punch(2, "ZAIN-EMP2", "2026-05-04", "08:00:00", "Check In"),
+        _punch(2, "ZAIN-EMP2", "2026-05-04", "17:00:00", "Check Out"),
     ])
     schedules = pd.DataFrame([
         {"Name": "ALI-EMP1", "Working Time": "دوام صباحى (8:00AM-5:00PM)"},
@@ -482,6 +487,8 @@ ABSENCE_DETAILS_COLUMNS = [
     # source IDs contributed punches to a given canonical (Employee
     # ID, Date) and what the merged total worked time was.
     "Raw Employee IDs", "Sources", "Total Worked",
+    # Gaming Friday Compensation audit column appended in this release.
+    "Friday Compensation",
 ]
 
 
