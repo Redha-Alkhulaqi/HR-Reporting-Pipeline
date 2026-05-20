@@ -594,8 +594,105 @@ def _build_daily_attendance(df, schedule_lookup):
     return daily
 
 
+def _build_timeoff_employee_resolver(emp_to_name):
+    """Return a callable that maps a time-off `Employee` string to a
+    list of canonical Employee IDs from the attendance frame.
+
+    The Odoo time-off (`hr.leave`) export sometimes carries the
+    employee's full registered name with extra words (e.g. "BINT")
+    that the attendance / schedule files omit. A previous version
+    of the absence engine matched time-off entries by exact name and
+    silently dropped any with a mismatch -- HR's approved Annual
+    Leave or Sick Leave then surfaced as a phantom Absence.
+
+    Match priority (mirrors the schedule lookup):
+      1. EMP code (e.g. "EMP374") if present in BOTH the time-off
+         Employee string and one of the attendance First Names.
+      2. NBSP-collapsed, uppercased exact name match.
+      3. Plain lower-cased normalized name match.
+      4. Otherwise: no match (no leaves credited; previous behaviour).
+    """
+    by_emp_code = {}
+    by_strong_norm = {}
+    by_norm_name = {}
+    for eid, name in emp_to_name.items():
+        if not name:
+            continue
+        emp_code = _extract_emp_code(name)
+        if emp_code:
+            by_emp_code.setdefault(emp_code, []).append(eid)
+        strong = _strong_normalize(name)
+        if strong:
+            by_strong_norm.setdefault(strong, []).append(eid)
+        norm = _normalize_name(name)
+        if norm:
+            by_norm_name.setdefault(norm, []).append(eid)
+
+    def resolve(tof_employee):
+        if tof_employee is None:
+            return []
+        try:
+            if pd.isna(tof_employee):
+                return []
+        except (TypeError, ValueError):
+            pass
+        text = str(tof_employee).strip()
+        if not text:
+            return []
+        emp_code = _extract_emp_code(text)
+        if emp_code and emp_code in by_emp_code:
+            return list(by_emp_code[emp_code])
+        strong = _strong_normalize(text)
+        if strong and strong in by_strong_norm:
+            return list(by_strong_norm[strong])
+        norm = _normalize_name(text)
+        if norm and norm in by_norm_name:
+            return list(by_norm_name[norm])
+        return []
+
+    return resolve
+
+
+def _build_approved_leaves_by_id(time_off_df, emp_to_name):
+    """Return dict: canonical Employee ID -> list of
+    (start, end, type, is_excuse) tuples for every approved leave
+    that resolves to that employee via the robust matcher.
+
+    Falls back to a name-keyed dict (legacy behaviour) when
+    `emp_to_name` is empty or every leave fails to resolve, so older
+    callers that don't have an attendance-derived name index still
+    get something back -- but with the new EMP-code matching enabled
+    by default whenever attendance data is available.
+    """
+    if time_off_df is None or time_off_df.empty:
+        return {}
+
+    leaves = time_off_df[time_off_df["Status"] == "Approved"].copy()
+    leaves["Employee"] = leaves["Employee"].astype(str).str.strip()
+    leaves["Start Date"] = pd.to_datetime(leaves["Start Date"], errors="coerce")
+    leaves["End Date"] = pd.to_datetime(leaves["End Date"], errors="coerce")
+    leaves = leaves.dropna(subset=["Start Date", "End Date"])
+    leaves["is_excuse"] = leaves["Time Off Type"].apply(_is_excuse_type)
+
+    resolve = _build_timeoff_employee_resolver(emp_to_name or {})
+    by_id = {}
+    for _, row in leaves.iterrows():
+        emp_ids = resolve(row["Employee"])
+        if not emp_ids:
+            continue
+        leave_tuple = (
+            row["Start Date"], row["End Date"],
+            row["Time Off Type"], bool(row["is_excuse"]),
+        )
+        for eid in emp_ids:
+            by_id.setdefault(eid, []).append(leave_tuple)
+    return by_id
+
+
 def _build_approved_leaves(time_off_df):
-    """Return dict: cleaned employee name -> list of (start, end, type, is_excuse)."""
+    """Legacy name-keyed lookup. Kept for backwards-compat callers
+    that don't have an attendance-derived name index handy. New code
+    should prefer `_build_approved_leaves_by_id`."""
     if time_off_df is None or time_off_df.empty:
         return {}
 
@@ -616,16 +713,21 @@ def _build_approved_leaves(time_off_df):
     return by_employee
 
 
-def _classify_row(row, approved_leaves):
-    """Return (status, excused_minutes, unexcused_minutes, time_off_type)."""
+def _classify_row(row, approved_leaves_by_id):
+    """Return (status, excused_minutes, unexcused_minutes, time_off_type).
+
+    `approved_leaves_by_id` is a dict keyed by canonical Employee ID
+    (built via the robust TOF resolver) so name-mismatches between
+    the time-off file and the attendance file no longer silently
+    drop approved leaves.
+    """
     if row["missing_schedule"]:
         return "Missing Schedule", 0, 0, None
 
     # Negative delay (early arrival) cannot be excused or unexcused; clamp.
     total_delay = max(0, int(row["Delay Minutes"]))
 
-    name = str(row["First Name"]).strip()
-    leaves_for_employee = approved_leaves.get(name, ())
+    leaves_for_employee = approved_leaves_by_id.get(row["Employee ID"], ())
 
     if not leaves_for_employee:
         if total_delay > GRACE_MINUTES:
@@ -663,11 +765,25 @@ def _classify_row(row, approved_leaves):
 
 
 def _attach_attendance_status(daily, time_off_df):
-    approved_leaves = _build_approved_leaves(time_off_df)
+    # Build the attendance-derived name index so the time-off
+    # resolver can match by EMP code / NBSP-normalized name even when
+    # the TOF file uses a slightly different employee name string.
+    emp_to_name = {}
+    if "First Name" in daily.columns:
+        for eid, sub in daily.groupby("Employee ID"):
+            names = sub["First Name"].dropna().astype(str).str.strip()
+            names = names[names != ""]
+            if not names.empty:
+                emp_to_name[eid] = names.iloc[0]
+    approved_leaves_by_id = _build_approved_leaves_by_id(
+        time_off_df, emp_to_name,
+    )
     columns = ["attendance_status", "excused_delay_minutes",
                "unexcused_delay_minutes", "time_off_type"]
     result = daily.apply(
-        lambda row: pd.Series(_classify_row(row, approved_leaves), index=columns),
+        lambda row: pd.Series(
+            _classify_row(row, approved_leaves_by_id), index=columns,
+        ),
         axis=1,
     )
     daily["attendance_status"] = result["attendance_status"]
@@ -1656,10 +1772,11 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
             attendance_set.add((eid, str(date)))
 
     # Approved time off -> (Employee ID, Date) -> (category, type_name).
-    name_to_ids = {}
-    for eid, name in emp_to_name.items():
-        if name:
-            name_to_ids.setdefault(name, []).append(eid)
+    # Use the robust resolver: TOF "Employee" -> attendance Employee ID
+    # by EMP code first, then NBSP-tolerant normalized name. This stops
+    # leaves from being silently dropped when the TOF file carries a
+    # slightly different employee name (e.g. extra middle word "BINT").
+    resolve_timeoff_emp = _build_timeoff_employee_resolver(emp_to_name)
 
     timeoff_by_id = {}
     if time_off_df is not None and not time_off_df.empty:
@@ -1673,7 +1790,7 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
         )
         approved = approved.dropna(subset=["Start Date", "End Date"])
         for _, row in approved.iterrows():
-            ids = name_to_ids.get(row["Employee"], [])
+            ids = resolve_timeoff_emp(row["Employee"])
             if not ids:
                 continue
             type_name = row["Time Off Type"]

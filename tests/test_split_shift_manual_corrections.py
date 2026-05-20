@@ -553,6 +553,58 @@ def test_emp418_alias_plus_manual_canonical_merge_2026_05_04():
     assert audit_row["absence_days"] == 0.0
 
 
+def test_timeoff_employee_name_mismatch_resolved_by_emp_code():
+    """Regression: EMP374 case.
+
+    Odoo's `hr.leave` export sometimes carries the employee's
+    registered name with extra words (e.g. middle name "BINT") that
+    the attendance / schedule files omit. The old absence engine
+    matched time-off by EXACT name and silently dropped any TOF row
+    whose Employee field didn't textually match an attendance First
+    Name -- so HR's approved Annual Leave and Sick Leave surfaced as
+    phantom Absences.
+
+    The new resolver matches by EMP code first (then NBSP-tolerant
+    normalized name), so name mismatches between TOF and attendance
+    no longer drop the leave.
+    """
+    # Attendance / schedule use the shorter name (no "BINT").
+    df = pd.DataFrame([
+        {"Employee ID": 4156144, "First Name": "AHOUD BAZARI BIN AHMED NAJI-EMP374",
+         "Date": "2026-04-29", "Punch Time": "09:00:00",
+         "Punch State": "Check In"},
+        {"Employee ID": 4156144, "First Name": "AHOUD BAZARI BIN AHMED NAJI-EMP374",
+         "Date": "2026-04-29", "Punch Time": "17:00:00",
+         "Punch State": "Check Out"},
+    ])
+    schedules = pd.DataFrame([{
+        "Name": "AHOUD BAZARI BIN AHMED NAJI-EMP374",
+        "Working Time": "دوام صباحى (9:00AM-5:00PM)",
+    }])
+    # Time off carries the LONGER name (with extra "BINT" word) --
+    # the bug condition. The resolver must still credit the leave
+    # because both names share the EMP374 code.
+    time_off = pd.DataFrame([{
+        "Employee": "AHOUD BINT BAZARI BIN AHMED NAJI-EMP374",
+        "Time Off Type": "Annual Leave",
+        "Start Date": "2026-04-30 09:00:00",
+        "End Date": "2026-04-30 17:00:00",
+        "Status": "Approved",
+    }])
+    summary, _ = calculate_metrics(
+        df, schedules, time_off,
+        period_start="2026-04-30", period_end="2026-04-30",
+    )
+    ad = summary["absence_details"]
+    row = ad[(ad["Employee ID"] == 4156144)
+             & (ad["Date"] == "2026-04-30")].iloc[0]
+    # The leave is credited as Vacation, NOT a phantom absence.
+    assert row["Absence Day Value"] == 0.0
+    assert bool(row["Is Vacation"]) is True
+    assert row["Time Off Type"] == "Annual Leave"
+    assert "Approved time off" in row["Absence Reason"]
+
+
 def test_event_day_split_does_not_affect_normal_employees():
     """A single-shift employee with one CI + one CO never triggers
     the event-day-split pattern (HR would need to add a CI+CO pair
