@@ -306,6 +306,7 @@ def main(argv=None):
         export_report(
             report_summary, report_daily,
             raw_punches=report_punches, schedules_df=report_schedules,
+            period_start=period_start, period_end=period_end,
         )
         logger.info("Excel report exported")
 

@@ -42,6 +42,95 @@ _TITLE_FONT = Font(bold=True, size=16, color="1F4E79")
 _SECTION_FONT = Font(bold=True, size=11, color="1F4E79")
 _CENTER = Alignment(horizontal="center", vertical="center")
 
+# Reporting Period header (rendered at the top of executive sheets).
+_PERIOD_HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")     # light blue
+_PERIOD_TIMESTAMP_FILL = PatternFill("solid", fgColor="F2F2F2")  # light gray
+_PERIOD_FONT = Font(bold=True, size=14, color="1F4E79")
+_PERIOD_TIMESTAMP_FONT = Font(bold=True, size=11, color="555555")
+_PERIOD_BLOCK_ROWS = 3  # period text + generated timestamp + blank spacer
+
+
+def _format_period_date(value):
+    """Render a date-like value as 'YYYY-MM-DD'. None / NaT -> empty."""
+    if value is None:
+        return ""
+    try:
+        ts = pd.to_datetime(value)
+        if pd.isna(ts):
+            return ""
+        return ts.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def _has_period(period_start, period_end):
+    """True when at least one of the two bounds is non-empty."""
+    return _format_period_date(period_start) != "" or \
+        _format_period_date(period_end) != ""
+
+
+def _write_reporting_period_block(ws, period_start, period_end, n_cols):
+    """Render the 3-row Reporting Period header at the top of `ws`.
+
+    Layout:
+        Row 1: 'Reporting Period: YYYY-MM-DD to YYYY-MM-DD'
+               (bold, size 14, centered, light-blue fill).
+        Row 2: 'Generated On: YYYY-MM-DD HH:MM AM/PM'
+               (bold, size 11, centered, light-gray fill).
+        Row 3: blank spacer (a small placeholder value pins ws.max_row
+               so subsequent ws.append() lands at row 4).
+
+    Returns the next row index available for downstream content (4).
+    Cells are merged across `n_cols` so the banner spans the report
+    width regardless of how many data columns follow.
+    """
+    start_text = _format_period_date(period_start)
+    end_text = _format_period_date(period_end)
+    if start_text and end_text:
+        period_text = f"Reporting Period: {start_text} to {end_text}"
+    elif start_text:
+        period_text = f"Reporting Period: from {start_text}"
+    elif end_text:
+        period_text = f"Reporting Period: through {end_text}"
+    else:
+        period_text = "Reporting Period: full attendance file"
+
+    generated_text = (
+        f"Generated On: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
+    )
+
+    width = max(1, n_cols)
+
+    # Row 1: Reporting Period.
+    ws.cell(row=1, column=1, value=period_text)
+    if width > 1:
+        ws.merge_cells(start_row=1, start_column=1,
+                       end_row=1, end_column=width)
+    c1 = ws.cell(row=1, column=1)
+    c1.font = _PERIOD_FONT
+    c1.alignment = Alignment(horizontal="center", vertical="center")
+    c1.fill = _PERIOD_HEADER_FILL
+    ws.row_dimensions[1].height = 26
+
+    # Row 2: Generated timestamp.
+    ws.cell(row=2, column=1, value=generated_text)
+    if width > 1:
+        ws.merge_cells(start_row=2, start_column=1,
+                       end_row=2, end_column=width)
+    c2 = ws.cell(row=2, column=1)
+    c2.font = _PERIOD_TIMESTAMP_FONT
+    c2.alignment = Alignment(horizontal="center", vertical="center")
+    c2.fill = _PERIOD_TIMESTAMP_FILL
+    ws.row_dimensions[2].height = 18
+
+    # Row 3: blank spacer. We must write SOMETHING (even a single space)
+    # so openpyxl counts the row toward ws.max_row -- otherwise the
+    # next ws.append() would overwrite this spacer row.
+    ws.cell(row=3, column=1, value=" ")
+    ws.row_dimensions[3].height = 6
+
+    return _PERIOD_BLOCK_ROWS + 1
+
 # Every chart on the Dashboard uses the same size so the 2x2 grid stays
 # aligned and no chart overlaps a neighbour.
 _CHART_WIDTH = 13
@@ -132,23 +221,45 @@ def _write_dataframe(ws, df, start_row):
     return start_row, data_start, data_end, next_row, n_cols
 
 
-def _build_data_sheet(ws, df):
-    """Populate a plain data sheet (header + rows + filter + freeze)."""
+def _build_data_sheet(ws, df, period_start=None, period_end=None):
+    """Populate a plain data sheet (header + rows + filter + freeze).
+
+    When `period_start` / `period_end` are provided, a 3-row Reporting
+    Period banner is rendered at the very top of the sheet and the
+    table header / data / freeze pane / auto-filter all shift down
+    accordingly.
+    """
+    show_period = _has_period(period_start, period_end)
     if df is None or df.empty:
-        ws.append(["(no data)"])
+        if show_period:
+            _write_reporting_period_block(ws, period_start, period_end, n_cols=1)
+            ws.cell(row=_PERIOD_BLOCK_ROWS + 1, column=1, value="(no data)")
+        else:
+            ws.append(["(no data)"])
         return
-    for row in dataframe_to_rows(df, index=False, header=True):
-        ws.append(_sanitize_row(row))
-    _style_header_row(ws, row=1, n_cols=ws.max_column)
-    ws.freeze_panes = "A2"
-    if ws.max_row > 1:
-        ws.auto_filter.ref = ws.dimensions
-    _autosize_columns(ws)
-    if ws.max_row > 1:
-        _format_employee_id_columns_as_text(
-            ws, header_row=1, data_start=2,
-            data_end=ws.max_row, n_cols=ws.max_column,
+
+    n_cols = len(df.columns)
+    if show_period:
+        header_row = _write_reporting_period_block(
+            ws, period_start, period_end, n_cols=n_cols,
         )
+    else:
+        header_row = 1
+
+    for r_offset, row in enumerate(dataframe_to_rows(df, index=False, header=True)):
+        for c_offset, value in enumerate(_sanitize_row(row)):
+            ws.cell(row=header_row + r_offset, column=c_offset + 1, value=value)
+
+    data_end = header_row + len(df)
+    _style_header_row(ws, row=header_row, n_cols=n_cols)
+    ws.freeze_panes = f"A{header_row + 1}"
+    last_col_letter = get_column_letter(n_cols)
+    ws.auto_filter.ref = f"A{header_row}:{last_col_letter}{data_end}"
+    _autosize_columns(ws)
+    _format_employee_id_columns_as_text(
+        ws, header_row=header_row, data_start=header_row + 1,
+        data_end=data_end, n_cols=n_cols,
+    )
 
 
 _PAYABLE_OT_HEADER_FILL = PatternFill("solid", fgColor="548235")   # dark green
@@ -157,7 +268,9 @@ _PAYABLE_OT_BORDER_GREEN = "548235"
 _NOTES_TITLE_FILL = PatternFill("solid", fgColor="DDEBF7")          # light blue
 
 
-def _apply_payable_overtime_styling(ws, payable_col_idx):
+def _apply_payable_overtime_styling(
+    ws, payable_col_idx, header_row=1, data_end_row=None,
+):
     """Highlight the payable-overtime column to match the mockup.
 
     - Header cell: dark-green fill with the standard bold-white font.
@@ -165,11 +278,17 @@ def _apply_payable_overtime_styling(ws, payable_col_idx):
     - Adds a thin dark-green border on left/right of every body cell
       and on the bottom of the header so the column visually pops
       out from its neighbors (like the green block in the mockup).
+
+    `header_row` is the row of the table header (1 by default, 4 when
+    the sheet carries a Reporting Period banner). `data_end_row`
+    defaults to `ws.max_row` for backward compat.
     """
     from openpyxl.styles import Border, Side
-    if ws.max_row < 1:
+    if data_end_row is None:
+        data_end_row = ws.max_row
+    if data_end_row < header_row:
         return
-    header_cell = ws.cell(row=1, column=payable_col_idx)
+    header_cell = ws.cell(row=header_row, column=payable_col_idx)
     header_cell.fill = _PAYABLE_OT_HEADER_FILL
     # The shared _style_header_row already set white-bold font; keep it.
 
@@ -178,7 +297,7 @@ def _apply_payable_overtime_styling(ws, payable_col_idx):
     header_border = Border(left=side, right=side, bottom=side)
     header_cell.border = header_border
 
-    for r in range(2, ws.max_row + 1):
+    for r in range(header_row + 1, data_end_row + 1):
         cell = ws.cell(row=r, column=payable_col_idx)
         cell.fill = _PAYABLE_OT_BODY_FILL
         cell.font = Font(bold=True, color="000000")
@@ -484,35 +603,50 @@ _ATTENDANCE_ALIAS_FILL = PatternFill("solid", fgColor="FFF2CC")    # light gold
 _ATTENDANCE_MANUAL_FILL = PatternFill("solid", fgColor="DDEBF7")   # light blue
 
 
-def _build_employee_attendance_sheet(ws, df):
-    """Render the Employee Attendance audit sheet."""
+def _build_employee_attendance_sheet(ws, df, period_start=None, period_end=None):
+    """Render the Employee Attendance audit sheet.
+
+    When `period_start` / `period_end` are provided, a 3-row Reporting
+    Period banner is rendered above the table.
+    """
+    show_period = _has_period(period_start, period_end)
     if df is None or df.empty:
-        ws.append(["(no attendance data available)"])
+        if show_period:
+            _write_reporting_period_block(ws, period_start, period_end, n_cols=1)
+            ws.cell(row=_PERIOD_BLOCK_ROWS + 1, column=1,
+                    value="(no attendance data available)")
+        else:
+            ws.append(["(no attendance data available)"])
         return
-    for row in dataframe_to_rows(df, index=False, header=True):
-        ws.append(_sanitize_row(row))
-    _style_header_row(ws, row=1, n_cols=ws.max_column)
+
+    n_cols = len(df.columns)
+    if show_period:
+        header_row = _write_reporting_period_block(
+            ws, period_start, period_end, n_cols=n_cols,
+        )
+    else:
+        header_row = 1
+    for r_offset, row in enumerate(dataframe_to_rows(df, index=False, header=True)):
+        for c_offset, value in enumerate(_sanitize_row(row)):
+            ws.cell(row=header_row + r_offset, column=c_offset + 1, value=value)
+    data_end = header_row + len(df)
+    _style_header_row(ws, row=header_row, n_cols=n_cols)
     # Freeze the employee/date identification columns + header row so
     # HR can scroll across many days without losing the row anchor.
-    ws.freeze_panes = "F2"
-    if ws.max_row > 1:
-        ws.auto_filter.ref = (
-            f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
-        )
+    ws.freeze_panes = f"F{header_row + 1}"
+    last_col_letter = get_column_letter(n_cols)
+    ws.auto_filter.ref = f"A{header_row}:{last_col_letter}{data_end}"
     _autosize_columns(ws, min_width=10, max_width=45)
-    if ws.max_row > 1:
-        _format_employee_id_columns_as_text(
-            ws, header_row=1, data_start=2,
-            data_end=ws.max_row, n_cols=ws.max_column,
-        )
+    _format_employee_id_columns_as_text(
+        ws, header_row=header_row, data_start=header_row + 1,
+        data_end=data_end, n_cols=n_cols,
+    )
 
     # Visual cue: tint rows that came in via alias mapping (gold) or
     # via a manual punch correction (blue). HR's eye lands on these
     # for audit much faster than reading the Source / Notes column.
-    if ws.max_row <= 1:
-        return
     source_col = _EMP_ATTENDANCE_COLS.index("Source / Notes") + 1
-    for r in range(2, ws.max_row + 1):
+    for r in range(header_row + 1, data_end + 1):
         value = ws.cell(row=r, column=source_col).value
         if not isinstance(value, str):
             continue
@@ -522,11 +656,11 @@ def _build_employee_attendance_sheet(ws, df):
         elif "Manual" in value:
             fill = _ATTENDANCE_MANUAL_FILL
         if fill is not None:
-            for c in range(1, ws.max_column + 1):
+            for c in range(1, n_cols + 1):
                 ws.cell(row=r, column=c).fill = fill
 
 
-def _build_executive_employee_sheet(ws, df):
+def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
     """Render the simplified executive Employee Summary sheet.
 
     14 columns expected (in this exact order):
@@ -551,23 +685,38 @@ def _build_executive_employee_sheet(ws, df):
     (Payable Overtime) is visually highlighted in green to mirror the
     mockup, and a Notes block is appended below the data describing
     the formula, rounding, and audit semantics.
-    """
-    if df is None or df.empty:
-        ws.append(["(no data)"])
-        return
-    for row in dataframe_to_rows(df, index=False, header=True):
-        ws.append(_sanitize_row(row))
-    _style_header_row(ws, row=1, n_cols=ws.max_column)
-    ws.freeze_panes = "A2"
-    data_end_row = ws.max_row
-    if data_end_row > 1:
-        ws.auto_filter.ref = (
-            f"A1:{get_column_letter(ws.max_column)}{data_end_row}"
-        )
-    _autosize_columns(ws)
 
-    if data_end_row <= 1:
+    When `period_start` / `period_end` are provided, a 3-row Reporting
+    Period banner is rendered above the table. All numeric formatters,
+    the payable-OT highlight, and the Employee ID TEXT pinning shift
+    by the banner's height accordingly.
+    """
+    show_period = _has_period(period_start, period_end)
+    if df is None or df.empty:
+        if show_period:
+            _write_reporting_period_block(ws, period_start, period_end, n_cols=1)
+            ws.cell(row=_PERIOD_BLOCK_ROWS + 1, column=1, value="(no data)")
+        else:
+            ws.append(["(no data)"])
         return
+
+    n_cols = len(df.columns)
+    if show_period:
+        header_row = _write_reporting_period_block(
+            ws, period_start, period_end, n_cols=n_cols,
+        )
+    else:
+        header_row = 1
+    for r_offset, row in enumerate(dataframe_to_rows(df, index=False, header=True)):
+        for c_offset, value in enumerate(_sanitize_row(row)):
+            ws.cell(row=header_row + r_offset, column=c_offset + 1, value=value)
+    data_end_row = header_row + len(df)
+    _style_header_row(ws, row=header_row, n_cols=n_cols)
+    ws.freeze_panes = f"A{header_row + 1}"
+    ws.auto_filter.ref = (
+        f"A{header_row}:{get_column_letter(n_cols)}{data_end_row}"
+    )
+    _autosize_columns(ws)
 
     # Integer columns: the three whole-day-count columns (4 Permission,
     # 5 Vacation, 6 Secondment) and the Gaming Friday Compensation Days
@@ -578,7 +727,7 @@ def _build_executive_employee_sheet(ws, df):
     # partial-attendance days contribute fractional (e.g. 0.5) values.
     _format_numeric_cells(
         ws,
-        rows=range(2, data_end_row + 1),
+        rows=range(header_row + 1, data_end_row + 1),
         cols=[4, 5, 6, 13],
         number_format="#,##0",
     )
@@ -587,31 +736,38 @@ def _build_executive_employee_sheet(ws, df):
     # 12 Break After Policy.
     _format_numeric_cells(
         ws,
-        rows=range(2, data_end_row + 1),
+        rows=range(header_row + 1, data_end_row + 1),
         cols=[3, 7, 8, 9, 10, 11, 12],
         number_format="0.0",
     )
     # Visually highlight the payable-overtime column.
-    _apply_payable_overtime_styling(ws, payable_col_idx=9)
+    _apply_payable_overtime_styling(
+        ws, payable_col_idx=9,
+        header_row=header_row, data_end_row=data_end_row,
+    )
     # Pin Employee ID column(s) to TEXT (@) so Excel never inserts
     # thousand separators into the identifier (e.g. 4195162, not
     # 4,195,162). Run AFTER the numeric formatters above so this is
     # the last write to those cells.
     _format_employee_id_columns_as_text(
-        ws, header_row=1, data_start=2,
-        data_end=data_end_row, n_cols=ws.max_column,
+        ws, header_row=header_row, data_start=header_row + 1,
+        data_end=data_end_row, n_cols=n_cols,
     )
     # Append the Notes block at the bottom.
-    _append_executive_notes_block(ws, n_cols=ws.max_column)
+    _append_executive_notes_block(ws, n_cols=n_cols)
 
 
-def _apply_daily_conditional_formatting(ws, df):
+def _apply_daily_conditional_formatting(ws, df, data_start_row=2):
     """Color-code each row in Daily Attendance by its dominant status.
 
     Rules are applied in priority order with stopIfTrue=True so each
     row gets exactly one fill, picking the most important condition.
     Priority (highest first): Excluded, Leave, Approved Excuse, Late,
     Early Leave, Missing Check Out, Overtime.
+
+    `data_start_row` is the spreadsheet row of the FIRST data row
+    (defaults to 2). It moves down to 5 when the sheet carries a
+    Reporting Period banner.
     """
     if df is None or df.empty:
         return
@@ -620,7 +776,16 @@ def _apply_daily_conditional_formatting(ws, df):
     n_rows = len(df)
     n_cols = len(cols)
     last_col_letter = get_column_letter(n_cols)
-    range_str = f"A2:{last_col_letter}{n_rows + 1}"
+    data_end_row = data_start_row + n_rows - 1
+    range_str = (
+        f"A{data_start_row}:{last_col_letter}{data_end_row}"
+    )
+    # Conditional-formatting formulas reference the first data row
+    # (Excel auto-shifts the row number for subsequent rows in the
+    # range). Keep this in lockstep with `data_start_row` so the
+    # rules still hit the same cells after the period banner pushed
+    # everything down.
+    R = data_start_row
 
     def col_letter(name):
         return get_column_letter(cols.index(name) + 1) if name in cols else None
@@ -647,29 +812,29 @@ def _apply_daily_conditional_formatting(ws, df):
 
     # Priority order (highest first). The first matching rule wins per row.
     if excluded_L:
-        _add(f"${excluded_L}2=TRUE", "C8A2C8")              # light violet
+        _add(f"${excluded_L}{R}=TRUE", "C8A2C8")              # light violet
     if status_L:
-        _add(f'${status_L}2="Leave"', "BFBFBF")             # gray
-        _add(f'${status_L}2="Approved Excuse"', "DDEBF7")   # light blue
+        _add(f'${status_L}{R}="Leave"', "BFBFBF")             # gray
+        _add(f'${status_L}{R}="Approved Excuse"', "DDEBF7")   # light blue
     # Early-leave ANOMALIES outrank normal Late/Early Leave so HR can
     # spot data-quality issues at a glance (distinct dark red).
     if early_leave_anomaly_L:
         _add(
-            f"${early_leave_anomaly_L}2=TRUE",
-            "8B0000", font_hex="FFFFFF", bold=True,         # dark red + white bold
+            f"${early_leave_anomaly_L}{R}=TRUE",
+            "8B0000", font_hex="FFFFFF", bold=True,           # dark red + white bold
         )
     if is_late_L and unexcused_L:
         _add(
-            f"OR(${is_late_L}2=TRUE,${unexcused_L}2>0)",
-            "C00000", font_hex="FFFFFF", bold=True,         # red + white bold
+            f"OR(${is_late_L}{R}=TRUE,${unexcused_L}{R}>0)",
+            "C00000", font_hex="FFFFFF", bold=True,           # red + white bold
         )
     if early_leave_L:
-        _add(f"${early_leave_L}2>0", "CC6600",
-             font_hex="FFFFFF")                              # dark orange
+        _add(f"${early_leave_L}{R}>0", "CC6600",
+             font_hex="FFFFFF")                                # dark orange
     if missing_co_L:
-        _add(f"${missing_co_L}2=TRUE", "FFFF00", bold=True)  # yellow
+        _add(f"${missing_co_L}{R}=TRUE", "FFFF00", bold=True)  # yellow
     if overtime_L:
-        _add(f"${overtime_L}2>0", "C6EFCE",
+        _add(f"${overtime_L}{R}>0", "C6EFCE",
              font_hex="006100")                              # green
 
 
@@ -730,10 +895,17 @@ def _format_numeric_cells(ws, rows, cols, number_format):
             cell.alignment = align
 
 
-def _build_dashboard(wb, summary):
+def _build_dashboard(wb, summary, period_start=None, period_end=None):
     ws = wb["Dashboard"]
     # Clean executive look: no gridlines.
     ws.sheet_view.showGridLines = False
+
+    show_period = _has_period(period_start, period_end)
+    # Vertical-shift the entire Dashboard layout when the period banner
+    # is rendered. The banner takes rows 2-4 (period + generated +
+    # spacer), pushing the KPI header from row 3 to row 5 and every
+    # chart anchor down by 2 rows.
+    row_shift = 2 if show_period else 0
 
     # Title bar.
     ws.merge_cells("A1:O1")
@@ -743,13 +915,49 @@ def _build_dashboard(wb, summary):
     title.alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    # Subtitle with the report timestamp -- helps HR confirm freshness
-    # when the workbook is forwarded or archived.
-    ws.merge_cells("A2:O2")
-    subtitle = ws["A2"]
-    subtitle.value = f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    subtitle.font = Font(italic=True, color="555555", size=10)
-    subtitle.alignment = Alignment(horizontal="left", vertical="center")
+    if show_period:
+        # Row 2: Reporting Period (matches the banner used on other sheets).
+        start_text = _format_period_date(period_start)
+        end_text = _format_period_date(period_end)
+        if start_text and end_text:
+            period_text = f"Reporting Period: {start_text} to {end_text}"
+        elif start_text:
+            period_text = f"Reporting Period: from {start_text}"
+        elif end_text:
+            period_text = f"Reporting Period: through {end_text}"
+        else:
+            period_text = "Reporting Period: full attendance file"
+        ws.merge_cells("A2:O2")
+        period_cell = ws["A2"]
+        period_cell.value = period_text
+        period_cell.font = _PERIOD_FONT
+        period_cell.alignment = Alignment(horizontal="center", vertical="center")
+        period_cell.fill = _PERIOD_HEADER_FILL
+        ws.row_dimensions[2].height = 26
+
+        # Row 3: Generated timestamp.
+        ws.merge_cells("A3:O3")
+        gen_cell = ws["A3"]
+        gen_cell.value = (
+            f"Generated On: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
+        )
+        gen_cell.font = _PERIOD_TIMESTAMP_FONT
+        gen_cell.alignment = Alignment(horizontal="center", vertical="center")
+        gen_cell.fill = _PERIOD_TIMESTAMP_FILL
+        ws.row_dimensions[3].height = 18
+
+        # Row 4: blank spacer.
+        ws.row_dimensions[4].height = 6
+    else:
+        # Subtitle with the report timestamp -- helps HR confirm freshness
+        # when the workbook is forwarded or archived.
+        ws.merge_cells("A2:O2")
+        subtitle = ws["A2"]
+        subtitle.value = (
+            f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        subtitle.font = Font(italic=True, color="555555", size=10)
+        subtitle.alignment = Alignment(horizontal="left", vertical="center")
 
     # ---------------- Executive KPIs (cols A-B) ----------------
     kpis = [
@@ -791,9 +999,11 @@ def _build_dashboard(wb, summary):
         ("Alias Records Mapped (info)",
          summary.get("employee_id_alias_records_mapped", 0), "#,##0"),
     ]
-    ws.cell(row=3, column=1, value="Metric")
-    ws.cell(row=3, column=2, value="Value")
-    _style_header_row(ws, row=3, n_cols=2)
+    kpi_header_row = 3 + row_shift  # row 3 by default, row 5 with banner
+    kpi_data_start = kpi_header_row + 1
+    ws.cell(row=kpi_header_row, column=1, value="Metric")
+    ws.cell(row=kpi_header_row, column=2, value="Value")
+    _style_header_row(ws, row=kpi_header_row, n_cols=2)
     centered = Alignment(horizontal="center", vertical="center")
     # Zebra striping for the KPI block + green accent for the payable
     # overtime KPI so it visually matches the Employee Summary
@@ -803,7 +1013,7 @@ def _build_dashboard(wb, summary):
     dq_accent = PatternFill("solid", fgColor="FFF2CC")
     accent_labels = {"Total Over Time (Payable 1.5x) (Hours)": payable_accent,
                      "Data Quality Score": dq_accent}
-    for i, (label, value, fmt) in enumerate(kpis, start=4):
+    for i, (label, value, fmt) in enumerate(kpis, start=kpi_data_start):
         label_cell = ws.cell(row=i, column=1, value=label)
         cell = ws.cell(row=i, column=2, value=value)
         cell.number_format = fmt
@@ -814,15 +1024,15 @@ def _build_dashboard(wb, summary):
             cell.fill = accent
             label_cell.font = Font(bold=True)
             cell.font = Font(bold=True)
-        elif (i - 4) % 2 == 1:  # alternate-row band
+        elif (i - kpi_data_start) % 2 == 1:  # alternate-row band
             label_cell.fill = band
             cell.fill = band
 
     # ---------------- Backing tables (placed below the charts) ----------------
     # Each chart is 13cm x 7cm (~18 rows tall). Three chart rows anchored
-    # at rows 3 / 22 / 41 cover roughly rows 3-58, so data tables start
-    # safely at row 60.
-    DATA_START = 60
+    # at the chart anchor rows below cover roughly 56 rows, so data tables
+    # start safely 2 rows further down.
+    DATA_START = 60 + row_shift
     section_label = ws.cell(row=DATA_START, column=1, value="Underlying Data")
     section_label.font = _SECTION_FONT
 
@@ -909,16 +1119,22 @@ def _build_dashboard(wb, summary):
         )
 
     # ---------------- Charts: 2x2+1 grid (anchors leave visual buffer) ----------------
-    # Layout (rows shifted down 2 rows in v1.x so the chart titles no
-    # longer collide with the KPI header at row 3 -- previously the
-    # 'Generated' subtitle pushed the KPI block down but chart anchors
-    # stayed at row 3, causing the pie title to render INSIDE the
-    # 'Metric / Value' header band):
-    #   C5    K5
-    #   C24   K24
-    #   C43
-    # Each chart 13cm x 7cm leaves a column/row of breathing room between
-    # neighbours and above the underlying-data section that starts at row 60.
+    # Layout: anchors live at C5 / K5 / C24 / K24 / C43 by default; when
+    # the Reporting Period banner is rendered (`row_shift = 2`) the
+    # entire grid drops to C7 / K7 / C26 / K26 / C45 so the pie title
+    # does NOT collide with the KPI header. Each chart is 13cm x 7cm.
+    chart_anchor = lambda row: f"{{col}}{row + row_shift}"  # not used; explicit below
+    anchor_tl = f"C{5 + row_shift}"   # top-left  (Attendance Status pie)
+    anchor_tr = f"K{5 + row_shift}"   # top-right (Daily Late Trend)
+    anchor_ml = f"C{24 + row_shift}"  # middle-left (Top Late)
+    anchor_mr = f"K{24 + row_shift}"  # middle-right (Top Overtime)
+    anchor_bl = f"C{43 + row_shift}"  # bottom-left (Top Early Leave)
+
+    # Cross-sheet header offsets: the Employee Summary / Daily Trend
+    # sheets carry their OWN period banner when the dashboard does, so
+    # their data rows live at row 5+ instead of row 2+. Compute the
+    # first-data-row for each sheet from its actual header.
+    other_sheet_first_data_row = _PERIOD_BLOCK_ROWS + 2 if show_period else 2
 
     # Chart 1 (top-left): Attendance Status pie.
     pie_labels = Reference(ws, min_col=1,
@@ -927,44 +1143,54 @@ def _build_dashboard(wb, summary):
                            min_row=status_data_start, max_row=status_data_end)
     ws.add_chart(
         _pie_chart("Attendance Status Breakdown", pie_labels, pie_values),
-        "C5",
+        anchor_tl,
     )
 
     # Chart 2 (top-right): Daily Late Trend (references Daily Trend sheet).
     if "Daily Trend" in wb.sheetnames:
         trend_ws = wb["Daily Trend"]
-        if trend_ws.max_row > 1:
+        trend_first_data = other_sheet_first_data_row
+        trend_header_row = trend_first_data - 1
+        if trend_ws.max_row >= trend_first_data:
             # Daily Trend cols: 1=Date, 2=total_records, 3=late_cases, ...
             trend_labels = Reference(
-                trend_ws, min_col=1, min_row=2, max_row=trend_ws.max_row
+                trend_ws, min_col=1,
+                min_row=trend_first_data, max_row=trend_ws.max_row,
             )
+            # titles_from_data=True -> include the header row for series name.
             trend_values = Reference(
-                trend_ws, min_col=3, min_row=1, max_row=trend_ws.max_row
+                trend_ws, min_col=3,
+                min_row=trend_header_row, max_row=trend_ws.max_row,
             )
             ws.add_chart(
                 _line_chart("Daily Late Trend", trend_labels, trend_values),
-                "K5",
+                anchor_tr,
             )
 
-    # Chart 3 (bottom-left): Top Late Employees -- references the
+    # Chart 3 (middle-left): Top Late Employees -- references the
     # simplified Employee Summary sheet which is sorted by
     # Total Late (Hours) desc.
     emp_ws = wb["Employee Summary"]
-    if emp_ws.max_row > 1:
-        n_late = min(10, emp_ws.max_row - 1)
+    emp_first_data = other_sheet_first_data_row
+    if emp_ws.max_row >= emp_first_data:
+        n_late = min(10, emp_ws.max_row - emp_first_data + 1)
         # Executive sheet cols: 1=Employee ID, 2=First Name,
-        # 3=Absence, 4=Permission, 5=Vacation, 6=Secondment,
-        # 7=Total Late (Hours), 8=Overtime, 9=Early Leave,
-        # 10=Break, 11=Break After Policy.
-        late_labels = Reference(emp_ws, min_col=2, min_row=2, max_row=1 + n_late)
-        late_values = Reference(emp_ws, min_col=7, min_row=2, max_row=1 + n_late)
+        # 3=Absence, ..., 7=Total Late (Hours), ...
+        late_labels = Reference(
+            emp_ws, min_col=2,
+            min_row=emp_first_data, max_row=emp_first_data + n_late - 1,
+        )
+        late_values = Reference(
+            emp_ws, min_col=7,
+            min_row=emp_first_data, max_row=emp_first_data + n_late - 1,
+        )
         ws.add_chart(
             _bar_chart("Top Late Employees", late_labels, late_values,
                        horizontal=True),
-            "C24",
+            anchor_ml,
         )
 
-    # Chart 4 (bottom-right): Top Overtime Employees.
+    # Chart 4 (middle-right): Top Overtime Employees.
     if ot_data_end >= ot_data_start and not simplified_overtime.empty:
         ot_labels = Reference(ws, min_col=2,
                               min_row=ot_data_start, max_row=ot_data_end)
@@ -973,10 +1199,10 @@ def _build_dashboard(wb, summary):
         ws.add_chart(
             _bar_chart("Top Overtime Employees", ot_labels, ot_values,
                        horizontal=True),
-            "K24",
+            anchor_mr,
         )
 
-    # Chart 5 (third row, left): Top Early Leave Employees.
+    # Chart 5 (bottom-left): Top Early Leave Employees.
     if el_data_end >= el_data_start and not simplified_el.empty:
         el_labels = Reference(ws, min_col=2,
                               min_row=el_data_start, max_row=el_data_end)
@@ -985,7 +1211,7 @@ def _build_dashboard(wb, summary):
         ws.add_chart(
             _bar_chart("Top Early Leave Employees", el_labels, el_values,
                        horizontal=True),
-            "C43",
+            anchor_bl,
         )
 
     # ---------------- Column widths + freeze ----------------
@@ -995,10 +1221,14 @@ def _build_dashboard(wb, summary):
                    "J", "K", "L", "M", "N", "O", "P", "Q"):
         ws.column_dimensions[letter].width = 11
     # Pin the title row and KPI header so they stay visible when scrolling.
-    ws.freeze_panes = "A4"
+    # Default: freeze below KPI header at A4. With banner: A6.
+    ws.freeze_panes = f"A{kpi_data_start}"
 
 
-def export_report(summary, daily, raw_punches=None, schedules_df=None):
+def export_report(
+    summary, daily, raw_punches=None, schedules_df=None,
+    period_start=None, period_end=None,
+):
     """Write the monthly Excel workbook.
 
     `raw_punches` is the post-alias, post-manual-correction punch
@@ -1007,16 +1237,31 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     audit sheet is rendered with paired-shift columns. Both arguments
     are optional for backward compat -- old callers that pass only
     `summary` + `daily` keep working and simply skip the new sheet.
+
+    `period_start` / `period_end` drive the Reporting Period banner at
+    the top of every executive sheet (Dashboard, Employee Summary,
+    Employee Attendance, Daily Attendance, Daily Trend, Department
+    Summary, and every audit sheet). When both are None the banner is
+    suppressed and sheets keep the legacy row-1 header.
     """
     print("Exporting Excel report...")
 
     wb = Workbook()
     wb.active.title = "Dashboard"
 
+    # Pre-resolve the period-banner kwargs once so every sheet builder
+    # call below stays uniform and the banner can be turned off by a
+    # single `None` pair in tests / legacy callers.
+    pkw = {"period_start": period_start, "period_end": period_end}
+    daily_data_start = (
+        _PERIOD_BLOCK_ROWS + 2 if _has_period(period_start, period_end) else 2
+    )
+
     # Always-present data sheets, in this tab order.
     _build_executive_employee_sheet(
         wb.create_sheet("Employee Summary"),
         summary.get("executive_employee_summary"),
+        **pkw,
     )
     # Employee Attendance -- audit-focused daily summary with split-
     # shift columns. Placed right after Employee Summary so HR can
@@ -1028,31 +1273,42 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
         _build_employee_attendance_sheet(
             wb.create_sheet("Employee Attendance"),
             attendance_rows,
+            **pkw,
         )
     daily_ws = wb.create_sheet("Daily Attendance")
-    _build_data_sheet(daily_ws, daily)
-    _apply_daily_conditional_formatting(daily_ws, daily)
-    _build_data_sheet(wb.create_sheet("Daily Trend"), summary.get("daily_trend"))
+    _build_data_sheet(daily_ws, daily, **pkw)
+    _apply_daily_conditional_formatting(
+        daily_ws, daily, data_start_row=daily_data_start,
+    )
+    _build_data_sheet(
+        wb.create_sheet("Daily Trend"), summary.get("daily_trend"), **pkw,
+    )
 
     # Optional sheets -- only added when the source data supplied them.
     missing_punches = summary.get("missing_punch_summary")
     if missing_punches is not None and not missing_punches.empty:
-        _build_data_sheet(wb.create_sheet("Missing Punches"), missing_punches)
+        _build_data_sheet(
+            wb.create_sheet("Missing Punches"), missing_punches, **pkw,
+        )
 
     department_summary = summary.get("department_summary")
     if department_summary is not None and not department_summary.empty:
-        _build_data_sheet(wb.create_sheet("Department Summary"), department_summary)
+        _build_data_sheet(
+            wb.create_sheet("Department Summary"), department_summary, **pkw,
+        )
 
     reconciliation_details = summary.get("employee_reconciliation_details")
     if reconciliation_details is not None and not reconciliation_details.empty:
         _build_data_sheet(
             wb.create_sheet("Employee Reconciliation Details"),
-            reconciliation_details,
+            reconciliation_details, **pkw,
         )
 
     employee_master = summary.get("employee_master")
     if employee_master is not None and not employee_master.empty:
-        _build_data_sheet(wb.create_sheet("Employee Master"), employee_master)
+        _build_data_sheet(
+            wb.create_sheet("Employee Master"), employee_master, **pkw,
+        )
 
     # Overtime sheet -- only rows where overtime actually happened.
     overtime_rows = daily[daily.get("overtime_status") == "Overtime"]
@@ -1071,6 +1327,7 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
                 "overtime_multiplier",
                 "overtime_payable_minutes", "overtime_payable_hours",
             ]],
+            **pkw,
         )
 
     # Early Leave sheet -- only rows where the employee genuinely left early.
@@ -1096,25 +1353,28 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
         _build_data_sheet(
             wb.create_sheet("Early Leave"),
             early_leave_rows[el_cols],
+            **pkw,
         )
 
     excluded_summary = summary.get("excluded_employees_summary")
     if excluded_summary is not None and not excluded_summary.empty:
         _build_data_sheet(
-            wb.create_sheet("Excluded Employees"), excluded_summary
+            wb.create_sheet("Excluded Employees"), excluded_summary, **pkw,
         )
 
     # Break analytics sheet -- informational, only when breaks exist.
     break_summary = summary.get("break_summary")
     if break_summary is not None and not break_summary.empty:
-        _build_data_sheet(wb.create_sheet("Break Summary"), break_summary)
+        _build_data_sheet(
+            wb.create_sheet("Break Summary"), break_summary, **pkw,
+        )
 
     # Absence audit ledger -- every (employee, date) and why it was
     # or wasn't counted as an absence.
     absence_details = summary.get("absence_details")
     if absence_details is not None and not absence_details.empty:
         _build_data_sheet(
-            wb.create_sheet("Absence Details"), absence_details
+            wb.create_sheet("Absence Details"), absence_details, **pkw,
         )
 
     # Per-employee audit totals (scheduled / attended / permission /
@@ -1123,7 +1383,7 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     absence_audit = summary.get("absence_audit")
     if absence_audit is not None and not absence_audit.empty:
         _build_data_sheet(
-            wb.create_sheet("Absence Audit"), absence_audit
+            wb.create_sheet("Absence Audit"), absence_audit, **pkw,
         )
 
     # Employee ID alias audit -- which historical IDs got remapped to
@@ -1131,7 +1391,7 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     alias_audit = summary.get("alias_audit")
     if alias_audit is not None and not alias_audit.empty:
         _build_data_sheet(
-            wb.create_sheet("Employee ID Alias Audit"), alias_audit
+            wb.create_sheet("Employee ID Alias Audit"), alias_audit, **pkw,
         )
 
     # Schedule lookup audit -- one row per (Employee ID, attendance name)
@@ -1141,7 +1401,7 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     schedule_audit = summary.get("schedule_lookup_audit")
     if schedule_audit is not None and not schedule_audit.empty:
         _build_data_sheet(
-            wb.create_sheet("Schedule Lookup Audit"), schedule_audit
+            wb.create_sheet("Schedule Lookup Audit"), schedule_audit, **pkw,
         )
 
     # Manual punch corrections that did NOT clear the approval / evidence
@@ -1149,17 +1409,20 @@ def export_report(summary, daily, raw_punches=None, schedules_df=None):
     rejected_corrections = summary.get("rejected_punch_corrections")
     if rejected_corrections is not None and not rejected_corrections.empty:
         _build_data_sheet(
-            wb.create_sheet("Manual Punch Rejections"), rejected_corrections
+            wb.create_sheet("Manual Punch Rejections"),
+            rejected_corrections, **pkw,
         )
 
     # High-level reconciliation table lives on its own sheet so the
     # Dashboard stays uncluttered.
     reconciliation = summary.get("employee_reconciliation")
     if reconciliation is not None and not reconciliation.empty:
-        _build_data_sheet(wb.create_sheet("Reconciliation"), reconciliation)
+        _build_data_sheet(
+            wb.create_sheet("Reconciliation"), reconciliation, **pkw,
+        )
 
     # Build Dashboard LAST so it can reference positions on the other sheets.
-    _build_dashboard(wb, summary)
+    _build_dashboard(wb, summary, **pkw)
 
     now = datetime.now()
     monthly_dir = REPORT_OUTPUT_DIR / now.strftime("%Y-%m")
