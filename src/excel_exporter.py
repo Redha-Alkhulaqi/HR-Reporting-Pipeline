@@ -73,6 +73,46 @@ def _autosize_columns(ws, min_width=12, max_width=45):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
+def _format_employee_id_columns_as_text(
+    ws, header_row, data_start, data_end, n_cols,
+):
+    """Force any 'Employee ID' column to render as plain TEXT.
+
+    Why: Excel infers a numeric type for large integer IDs (4195162)
+    and applies a thousand-separator format (4,195,162) by default,
+    which is wrong for an identifier column. Employee IDs are codes,
+    not measurements -- they must display exactly as stored.
+
+    Behavior:
+    - Walks the header row and locates every column whose header
+      contains 'Employee ID' (covers 'Employee ID', 'Raw Employee ID',
+      'Canonical Employee ID', 'Old Employee ID', 'Current Employee ID').
+    - For each data cell in those columns rewrites the value as a bare
+      string, strips any thousand-separator commas and surrounding
+      whitespace, and pins number_format='@' so Excel keeps the cell as
+      TEXT on any subsequent edit.
+    """
+    if data_end < data_start:
+        return
+    for col in range(1, n_cols + 1):
+        header = ws.cell(row=header_row, column=col).value
+        if not isinstance(header, str) or "Employee ID" not in header:
+            continue
+        for r in range(data_start, data_end + 1):
+            cell = ws.cell(row=r, column=col)
+            v = cell.value
+            if v is None or v == "":
+                continue
+            if isinstance(v, float) and v.is_integer():
+                text = str(int(v))
+            elif isinstance(v, (int, float)):
+                text = str(v)
+            else:
+                text = str(v).replace(",", "").strip()
+            cell.value = text
+            cell.number_format = "@"
+
+
 def _write_dataframe(ws, df, start_row):
     """Write a DataFrame anchored at start_row. Returns:
         (header_row, data_start_row, data_end_row, next_blank_row, n_cols).
@@ -85,6 +125,10 @@ def _write_dataframe(ws, df, start_row):
     data_start = start_row + 1
     data_end = start_row + len(df)
     next_row = data_end + 2  # one blank row of breathing room
+    _format_employee_id_columns_as_text(
+        ws, header_row=start_row, data_start=data_start,
+        data_end=data_end, n_cols=n_cols,
+    )
     return start_row, data_start, data_end, next_row, n_cols
 
 
@@ -100,6 +144,11 @@ def _build_data_sheet(ws, df):
     if ws.max_row > 1:
         ws.auto_filter.ref = ws.dimensions
     _autosize_columns(ws)
+    if ws.max_row > 1:
+        _format_employee_id_columns_as_text(
+            ws, header_row=1, data_start=2,
+            data_end=ws.max_row, n_cols=ws.max_column,
+        )
 
 
 _PAYABLE_OT_HEADER_FILL = PatternFill("solid", fgColor="548235")   # dark green
@@ -451,6 +500,11 @@ def _build_employee_attendance_sheet(ws, df):
             f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
         )
     _autosize_columns(ws, min_width=10, max_width=45)
+    if ws.max_row > 1:
+        _format_employee_id_columns_as_text(
+            ws, header_row=1, data_start=2,
+            data_end=ws.max_row, n_cols=ws.max_column,
+        )
 
     # Visual cue: tint rows that came in via alias mapping (gold) or
     # via a manual punch correction (blue). HR's eye lands on these
@@ -515,15 +569,17 @@ def _build_executive_employee_sheet(ws, df):
     if data_end_row <= 1:
         return
 
-    # Integer columns: Employee ID (1) plus the three whole-day-count
-    # columns (4 Permission, 5 Vacation, 6 Secondment) and the Gaming
-    # Friday Compensation Days column (13). Absence (col 3) is
-    # rendered at 1 decimal because split-shift partial-attendance
-    # days contribute fractional (e.g. 0.5) values to it.
+    # Integer columns: the three whole-day-count columns (4 Permission,
+    # 5 Vacation, 6 Secondment) and the Gaming Friday Compensation Days
+    # column (13). Employee ID (col 1) is intentionally NOT included
+    # because it is an identifier, not a measurement -- it gets its
+    # own TEXT (@) format below to suppress thousand separators.
+    # Absence (col 3) is rendered at 1 decimal because split-shift
+    # partial-attendance days contribute fractional (e.g. 0.5) values.
     _format_numeric_cells(
         ws,
         rows=range(2, data_end_row + 1),
-        cols=[1, 4, 5, 6, 13],
+        cols=[4, 5, 6, 13],
         number_format="#,##0",
     )
     # 1-decimal columns: 3 Absence (fractional for split-shift),
@@ -537,6 +593,14 @@ def _build_executive_employee_sheet(ws, df):
     )
     # Visually highlight the payable-overtime column.
     _apply_payable_overtime_styling(ws, payable_col_idx=9)
+    # Pin Employee ID column(s) to TEXT (@) so Excel never inserts
+    # thousand separators into the identifier (e.g. 4195162, not
+    # 4,195,162). Run AFTER the numeric formatters above so this is
+    # the last write to those cells.
+    _format_employee_id_columns_as_text(
+        ws, header_row=1, data_start=2,
+        data_end=data_end_row, n_cols=ws.max_column,
+    )
     # Append the Notes block at the bottom.
     _append_executive_notes_block(ws, n_cols=ws.max_column)
 
@@ -794,12 +858,15 @@ def _build_dashboard(wb, summary):
         ws, simplified_overtime, status_next + 1
     )
     if not simplified_overtime.empty:
-        # Employee ID col 1 and total_overtime_minutes col 3 use integer
-        # thousands format; total_overtime_hours col 4 uses one decimal.
+        # total_overtime_minutes col 3 uses integer thousands format;
+        # total_overtime_hours col 4 uses one decimal. Employee ID
+        # (col 1) is intentionally excluded -- _write_dataframe already
+        # pinned it to TEXT (@) so Excel does not render commas in
+        # the identifier (4195162, not 4,195,162).
         _format_numeric_cells(
             ws,
             rows=range(ot_data_start, ot_data_end + 1),
-            cols=[1, 3],
+            cols=[3],
             number_format="#,##0",
         )
         _format_numeric_cells(
@@ -826,10 +893,12 @@ def _build_dashboard(wb, summary):
         ws, simplified_el, ot_next + 1
     )
     if not simplified_el.empty:
+        # Employee ID (col 1) intentionally excluded -- already pinned
+        # to TEXT (@) by _write_dataframe to suppress comma separators.
         _format_numeric_cells(
             ws,
             rows=range(el_data_start, el_data_end + 1),
-            cols=[1, 3],
+            cols=[3],
             number_format="#,##0",
         )
         _format_numeric_cells(
