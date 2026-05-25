@@ -4,6 +4,14 @@
 [![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen.svg)](tests/)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
+<div align="center">
+
+![HR Reporting Pipeline Dashboard](docs/assets/hr_reporting_dashboard.png)
+
+*Production-grade HR attendance and payroll analytics dashboard.*
+
+</div>
+
 > Monthly HR attendance reporting pipeline for organizations running **BioTime** punch devices and **Odoo** HR.
 
 ---
