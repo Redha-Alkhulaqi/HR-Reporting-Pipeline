@@ -122,6 +122,37 @@ A clean run typically reports `data_quality_score ≥ 95`.
 
 ---
 
+## Current Validation Snapshot
+
+Latest successful production-style run for May 2026:
+
+- Reporting population: 43 employees
+- Data quality score: 98.4
+- Missing schedule cases: 0
+- Orphan attendance records: 0
+- Missing employee IDs: 0
+- Invalid punches: 0
+- Absence audit reconciliation breaks: 0
+- Employee ID alias records mapped: 453
+- Friday compensation days: 2
+- Overtime multiplier: 1.5x
+- Test suite: 228 passing
+- Release: v1.0.1 — Reconciliation Accuracy Fix
+
+This confirms that all non-excluded employees satisfy the reconciliation invariant:
+
+```text
+scheduled_working_days
+==
+attended_days
++ permission_days
++ vacation_days
++ secondment_days
++ absence_days
+```
+
+---
+
 ## 5. Required Input Files
 
 All files live under [data/](data/). Excel format (`.xlsx`) is required.
