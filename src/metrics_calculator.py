@@ -1997,29 +1997,56 @@ def _build_absence_details(daily, df, schedules_df, time_off_df, excluded_df,
                     f"{s}-{e}" for s, e in (intervals or [])
                 ]
                 missed_labels = []
-            if is_scheduled and not has_off and not is_excluded:
-                if total_intervals > 0 and attended_count > 0:
-                    # Interval-aware: at least one interval was
-                    # genuinely attended. Compute the fractional
-                    # split-shift absence day value.
-                    absence_day_value = (
-                        (total_intervals - attended_count) / total_intervals
-                    )
-                    attended_day_value = attended_count / total_intervals
-                elif has_att:
-                    # Conservative fallback: there IS a check-in but
-                    # none of it fell inside any known interval window
-                    # (e.g. employee with no parseable shift, or odd
-                    # punch time). Preserve legacy semantics -- count
-                    # as a fully attended day, never penalize HR data
-                    # quirks as a partial absence.
+            if is_scheduled and not is_excluded:
+                # Reconciliation invariant (per employee, across all
+                # rows of a reporting period):
+                #     scheduled_working_days
+                #       == attended_days + permission_days + vacation_days
+                #          + secondment_days + absence_days
+                # The audit's permission / vacation / secondment buckets
+                # fire on `working & ~Has Attendance & Is <type>`, so
+                # they cover ONLY days where the leave fully REPLACED
+                # attendance. The current branch must therefore credit
+                # any day where the employee actually attended as an
+                # attended day -- otherwise an "Attended with approved
+                # time off" day would zero every bucket and leak a
+                # full day out of the reconciliation balance (e.g. a
+                # partial-day permission to leave early that still
+                # had the employee at work in the morning).
+                if has_att:
+                    if total_intervals > 0 and attended_count > 0:
+                        # Interval-aware: at least one interval was
+                        # genuinely attended. Compute the fractional
+                        # split-shift absence day value.
+                        absence_day_value = (
+                            (total_intervals - attended_count) / total_intervals
+                        )
+                        attended_day_value = attended_count / total_intervals
+                    else:
+                        # Conservative fallback: there IS a check-in
+                        # but none of it fell inside any known
+                        # interval window (e.g. employee with no
+                        # parseable shift, or odd punch time).
+                        # Preserve legacy semantics -- count as a
+                        # fully attended day, never penalize HR data
+                        # quirks as a partial absence.
+                        absence_day_value = 0.0
+                        attended_day_value = 1.0
+                elif has_off:
+                    # No attendance but approved time off covers the
+                    # day. The audit's permission / vacation /
+                    # secondment buckets carry this day; attended +
+                    # absence both zero by construction.
                     absence_day_value = 0.0
-                    attended_day_value = 1.0
+                    attended_day_value = 0.0
                 else:
                     # No check-in and no leave -> full absence.
                     absence_day_value = 1.0
                     attended_day_value = 0.0
             else:
+                # Not scheduled (weekly off / public holiday) or
+                # excluded -- neither attended nor absent; the audit
+                # filters these rows from the working-day total.
                 absence_day_value = 0.0
                 attended_day_value = 0.0
 
