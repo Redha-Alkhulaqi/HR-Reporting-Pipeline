@@ -121,8 +121,11 @@ def test_executive_employee_sheet_carries_banner_above_header_row_4():
     # Data starts at row 5; Employee ID still stored as TEXT.
     assert ws.cell(row=5, column=1).value == "4195162"
     assert ws.cell(row=5, column=1).number_format == "@"
-    # Freeze pane was lifted to A5 (was A2 pre-banner).
-    assert ws.freeze_panes == "A5"
+    # Freeze pane: header row (5) AND first two columns. The Phase-1
+    # readability refresh moved this from "A5" (header only) to "C5"
+    # so HR can scroll across the 14 metric columns without losing
+    # Employee ID + First Name as the row anchor.
+    assert ws.freeze_panes == "C5"
 
 
 def test_data_sheet_carries_banner_above_header_row_4():
@@ -236,15 +239,16 @@ def test_export_report_renders_banner_on_dashboard_and_data_sheets(
     wb = load_workbook(written[0])
 
     # Dashboard: title at row 1, then Reporting Period at row 2,
-    # Generated On at row 3, KPI header at row 5.
+    # Generated On at row 3. The Phase-1 redesign drops the legacy
+    # `Metric / Value` two-column KPI table in favour of 4 hero KPI
+    # cards starting at row 6 -- see test_dashboard_layout.py for the
+    # full card / section / chart / backing-table layout contract.
     dash = wb["Dashboard"]
     assert dash.cell(row=1, column=1).value == "HR Reporting Dashboard"
     assert "Reporting Period:" in (dash.cell(row=2, column=1).value or "")
     assert PERIOD_START in dash.cell(row=2, column=1).value
     assert PERIOD_END in dash.cell(row=2, column=1).value
     assert "Generated On:" in (dash.cell(row=3, column=1).value or "")
-    assert dash.cell(row=5, column=1).value == "Metric"
-    assert dash.cell(row=5, column=2).value == "Value"
 
     # Every data sheet must carry the banner in rows 1-2 and have its
     # header at row 4. Use a representative subset.

@@ -27,7 +27,25 @@ from datetime import datetime
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+from openpyxl.chart.axis import ChartLines
+from openpyxl.chart.data_source import StrRef
 from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.layout import Layout, ManualLayout
+from openpyxl.chart.legend import Legend
+from openpyxl.chart.marker import Marker
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.text import RichText
+from openpyxl.chart.title import Title
+from openpyxl.drawing.colors import ColorChoice
+from openpyxl.drawing.fill import ColorChoice as DrawingColorChoice
+from openpyxl.drawing.line import LineProperties
+from openpyxl.drawing.text import (
+    CharacterProperties,
+    Paragraph,
+    ParagraphProperties,
+    RegularTextRun,
+    RichTextProperties,
+)
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -132,9 +150,11 @@ def _write_reporting_period_block(ws, period_start, period_end, n_cols):
     return _PERIOD_BLOCK_ROWS + 1
 
 # Every chart on the Dashboard uses the same size so the 2x2 grid stays
-# aligned and no chart overlaps a neighbour.
-_CHART_WIDTH = 13
-_CHART_HEIGHT = 7
+# aligned and no chart overlaps a neighbour. Bumped from the original
+# 13x7 to 16x9 in the polish pass so HR can read tick labels at a
+# glance without clicking into the chart.
+_CHART_WIDTH = 16
+_CHART_HEIGHT = 9
 
 
 def _sanitize_row(row):
@@ -306,54 +326,42 @@ def _apply_payable_overtime_styling(
 
 
 def _append_executive_notes_block(ws, n_cols):
-    """Append the Overtime Payable notes block at the bottom of the
-    Employee Summary sheet, matching the mockup.
+    """Append a compact Notes area below the data.
 
-    The block sits two rows below the data, spans 6 columns, and
-    documents the formula, rounding, and that actual overtime is
-    preserved alongside payable.
+    Phase-1 readability refresh: the long mockup-style note block
+    (8 rows of explanatory bullets + badge) was visually dominating
+    the bottom of the sheet on a laptop screen and competing with
+    the data table for attention. The replacement is a 2-row note
+    that points HR at the important highlighted columns and the
+    payable-overtime multiplier, then gets out of the way.
     """
-    start_row = ws.max_row + 3
+    start_row = ws.max_row + 2  # one blank row of breathing room
+    span_end = min(8, n_cols)   # cap merge width so it stays compact
 
-    # Title row.
-    title_cell = ws.cell(row=start_row, column=1, value=
-                         "Notes -- Overtime Payable (1.5x)")
-    title_cell.font = Font(bold=True, size=12, color="1F4E79")
+    # Single-row title + body.
+    title_cell = ws.cell(
+        row=start_row, column=1, value="Notes",
+    )
+    title_cell.font = Font(bold=True, size=11, color="1F4E79")
     title_cell.fill = _NOTES_TITLE_FILL
+    title_cell.alignment = Alignment(horizontal="left", vertical="center",
+                                     indent=1)
     ws.merge_cells(start_row=start_row, start_column=1,
-                   end_row=start_row, end_column=min(6, n_cols))
+                   end_row=start_row, end_column=span_end)
+    ws.row_dimensions[start_row].height = 20
 
-    notes = [
-        "Overtime is now reported with a payroll multiplier of 1.5 for all employees.",
-        "Column H (Total Over Time (Hours) (Actual)) = Actual overtime duration "
-        "(physical hours worked beyond schedule).",
-        "Column I (Total Over Time (Payable 1.5x) (Hours)) = Payable overtime "
-        "hours after applying the 1.5x multiplier.",
-        "Formula: Payable Overtime (Hours) = Actual Overtime (Hours) x 1.5.",
-        "Rounding: per-row payable minutes are rounded half-up to the nearest "
-        "minute; hour values displayed to 1 decimal place.",
-        "Actual overtime hours are preserved for audit and operational analysis. "
-        "Payable overtime hours apply the global 1.5x payroll multiplier.",
-        "Multiplier is configured via OVERTIME_PAY_MULTIPLIER; set to 1.0 to "
-        "disable the premium without code changes.",
-    ]
-    for i, line in enumerate(notes, start=1):
-        c = ws.cell(row=start_row + i, column=1, value=f"•  {line}")
-        c.alignment = Alignment(wrap_text=True, vertical="top")
-        ws.merge_cells(start_row=start_row + i, start_column=1,
-                       end_row=start_row + i,
-                       end_column=min(6, n_cols))
-        ws.row_dimensions[start_row + i].height = 18
-
-    # Closing badge row.
-    badge_row = start_row + len(notes) + 1
-    badge = ws.cell(row=badge_row, column=1,
-                    value="Multiplier applied globally: 1.5x")
-    badge.font = Font(bold=True, color="1F4E79")
-    badge.fill = _NOTES_TITLE_FILL
-    badge.alignment = _CENTER
-    ws.merge_cells(start_row=badge_row, start_column=1,
-                   end_row=badge_row, end_column=min(6, n_cols))
+    body = (
+        "Payable Overtime (Hours) = Actual Overtime × 1.5; per-row minutes "
+        "rounded half-up. Highlighted columns are the metrics most material "
+        "to payroll review."
+    )
+    body_cell = ws.cell(row=start_row + 1, column=1, value=body)
+    body_cell.font = Font(size=10, color="333333")
+    body_cell.alignment = Alignment(wrap_text=True, vertical="top",
+                                    indent=1)
+    ws.merge_cells(start_row=start_row + 1, start_column=1,
+                   end_row=start_row + 1, end_column=span_end)
+    ws.row_dimensions[start_row + 1].height = 32
 
 
 # ---------------------------------------------------------------------------
@@ -660,10 +668,113 @@ def _build_employee_attendance_sheet(ws, df, period_start=None, period_end=None)
                 ws.cell(row=r, column=c).fill = fill
 
 
-def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
-    """Render the simplified executive Employee Summary sheet.
+# ---------------------------------------------------------------------------
+# Employee Summary -- readability refresh (Phase 1)
+# ---------------------------------------------------------------------------
+# Per-column body tints for the 4 "important" metric columns. These are
+# the metrics HR/payroll review most closely; tinting them at low
+# saturation makes the eye land on them without overpowering the rest
+# of the sheet. Column 9 (Payable Overtime) is the only column that
+# gets a bolder green + border treatment via _apply_payable_overtime_styling.
+_EMP_SUMMARY_IMPORTANT_TINTS = {
+    3:  "FCE4E4",   # No of Absence Days     -- soft red
+    7:  "FBE5D6",   # Total Late (Hours)     -- soft peach
+    10: "FFF2CC",   # Total Early Leave      -- soft yellow
+    12: "DDEBF7",   # Break Time (After Policy) -- soft blue
+}
+# Subtle zebra stripe for non-highlighted columns on even data rows.
+_EMP_SUMMARY_ZEBRA_FILL = "F8F8F8"
 
-    14 columns expected (in this exact order):
+# Per-column widths. Names get more room; numeric columns stay narrow
+# so the wrapped header text breaks at sensible word boundaries and
+# all 14 columns fit on a landscape print page.
+_EMP_SUMMARY_COLUMN_WIDTHS = {
+    1:  14,  # Employee ID
+    2:  36,  # First Name -- widened in the polish pass so full
+             # employee names (often 4+ words ending with the EMP code)
+             # render on one line instead of wrapping mid-name.
+    3:  12,  # No of Absence Days
+    4:  12,  # No of Permission Days
+    5:  12,  # No of Vacation Days
+    6:  12,  # No of Secondment Days
+    7:  13,  # Total Late (Hours)
+    8:  14,  # Total Over Time (Hours) (Actual)
+    9:  14,  # Total Over Time (Payable 1.5x) (Hours)
+    10: 13,  # Total Early Leave (Hours)
+    11: 12,  # Break Time (Hours)
+    12: 14,  # Break Time (After Policy)
+    13: 12,  # Friday Compensation Days
+    14: 24,  # Friday Worked Dates
+}
+
+
+def _apply_employee_summary_body_fills(
+    ws, header_row, data_start, data_end, n_cols,
+):
+    """Apply zebra striping + important-column tints to the data body.
+
+    - Every other data row gets a very light gray fill on the
+      non-highlighted columns (subtle, low contrast).
+    - The 4 "important" columns (Absence, Late, Early Leave, Break
+      After Policy) get a solid soft-color tint on EVERY row so HR's
+      eye can find them column-wise.
+    - Column 9 (Payable Overtime) is skipped here; its bolder green
+      treatment is applied later by `_apply_payable_overtime_styling`
+      and would otherwise be overwritten.
+    """
+    zebra = PatternFill("solid", fgColor=_EMP_SUMMARY_ZEBRA_FILL)
+    tint_fills = {
+        col: PatternFill("solid", fgColor=color)
+        for col, color in _EMP_SUMMARY_IMPORTANT_TINTS.items()
+    }
+    for r in range(data_start, data_end + 1):
+        is_even = ((r - data_start) % 2) == 1
+        for c in range(1, n_cols + 1):
+            if c == 9:
+                continue  # Payable OT styled separately.
+            if c in tint_fills:
+                ws.cell(row=r, column=c).fill = tint_fills[c]
+            elif is_even:
+                ws.cell(row=r, column=c).fill = zebra
+
+
+def _style_employee_summary_header(ws, header_row, n_cols):
+    """Style the header row so the long column names wrap cleanly
+    over 2-3 lines instead of overflowing into neighboring cells.
+
+    Header font, fill, and centering come from `_style_header_row`;
+    this helper then sets wrap_text + a taller row height so the
+    multi-line labels are fully visible without clipping.
+    """
+    _style_header_row(ws, row=header_row, n_cols=n_cols)
+    wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for c in range(1, n_cols + 1):
+        ws.cell(row=header_row, column=c).alignment = wrap
+    ws.row_dimensions[header_row].height = 42
+
+
+def _apply_employee_summary_print_settings(ws, header_row):
+    """Configure the sheet for printer-friendly output.
+
+    - Landscape orientation so the 14 columns fit one one printed page.
+    - Fit-to-width = 1 page; fit-to-height = 0 (let it grow vertically).
+    - Repeat rows 1..header_row on every printed page so the Reporting
+      Period banner + column headers are visible above the data on
+      page 2+, not just page 1.
+    """
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    # Repeat the banner + header band on every printed page.
+    ws.print_title_rows = f"1:{header_row}"
+    ws.print_options.horizontalCentered = True
+
+
+def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
+    """Render the executive Employee Summary sheet (readability refresh).
+
+    14 columns expected (unchanged in this Phase-1 refresh):
         1.  Employee ID
         2.  First Name
         3.  No of Absence Days       (reduced by Friday compensation)
@@ -679,17 +790,20 @@ def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
         13. Friday Compensation Days  (Gaming Friday Compensation)
         14. Friday Worked Dates       (audit list of paired Fridays)
 
-    Apply executive-friendly formatting: bold header, frozen header,
-    auto-filter, centered numeric cells, thousands separator on
-    integer columns, 1-decimal display on all hour columns. Column 9
-    (Payable Overtime) is visually highlighted in green to mirror the
-    mockup, and a Notes block is appended below the data describing
-    the formula, rounding, and audit semantics.
-
-    When `period_start` / `period_end` are provided, a 3-row Reporting
-    Period banner is rendered above the table. All numeric formatters,
-    the payable-OT highlight, and the Employee ID TEXT pinning shift
-    by the banner's height accordingly.
+    Readability features (no calculation changes):
+    - Wrapped, taller header row so long labels read on 2-3 lines.
+    - Frozen header row AND first two columns so Employee ID + First
+      Name + the header stay visible while scrolling.
+    - Consistent numeric formats: `#,##0` for integer day counts,
+      `0.0` for hour / fractional-day values.
+    - Subtle zebra striping for the non-highlighted columns.
+    - Soft per-column tints on the 4 metrics most material to
+      payroll review (Absence / Late Hours / Early Leave / Break
+      After Policy). Column 9 (Payable Overtime) keeps its bolder
+      green + bordered treatment.
+    - Compact 2-row Notes area instead of the 9-row block.
+    - Print-friendly: landscape, fit to width, repeat banner +
+      header rows on every printed page.
     """
     show_period = _has_period(period_start, period_end)
     if df is None or df.empty:
@@ -710,24 +824,30 @@ def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
     for r_offset, row in enumerate(dataframe_to_rows(df, index=False, header=True)):
         for c_offset, value in enumerate(_sanitize_row(row)):
             ws.cell(row=header_row + r_offset, column=c_offset + 1, value=value)
+    data_start_row = header_row + 1
     data_end_row = header_row + len(df)
-    _style_header_row(ws, row=header_row, n_cols=n_cols)
-    ws.freeze_panes = f"A{header_row + 1}"
+
+    # Header band with wrapped, taller labels.
+    _style_employee_summary_header(ws, header_row=header_row, n_cols=n_cols)
+
+    # Filter spans the header + body.
     ws.auto_filter.ref = (
         f"A{header_row}:{get_column_letter(n_cols)}{data_end_row}"
     )
-    _autosize_columns(ws)
+
+    # Explicit column widths -- skip _autosize_columns so the wrapped
+    # header doesn't get expanded into a single ugly long line.
+    for col_idx, width in _EMP_SUMMARY_COLUMN_WIDTHS.items():
+        if col_idx <= n_cols:
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     # Integer columns: the three whole-day-count columns (4 Permission,
-    # 5 Vacation, 6 Secondment) and the Gaming Friday Compensation Days
-    # column (13). Employee ID (col 1) is intentionally NOT included
-    # because it is an identifier, not a measurement -- it gets its
-    # own TEXT (@) format below to suppress thousand separators.
-    # Absence (col 3) is rendered at 1 decimal because split-shift
-    # partial-attendance days contribute fractional (e.g. 0.5) values.
+    # 5 Vacation, 6 Secondment) and the Gaming Friday Compensation
+    # Days column (13). Employee ID (col 1) is intentionally NOT
+    # included -- it gets its own TEXT (@) format below.
     _format_numeric_cells(
         ws,
-        rows=range(header_row + 1, data_end_row + 1),
+        rows=range(data_start_row, data_end_row + 1),
         cols=[4, 5, 6, 13],
         number_format="#,##0",
     )
@@ -736,24 +856,44 @@ def _build_executive_employee_sheet(ws, df, period_start=None, period_end=None):
     # 12 Break After Policy.
     _format_numeric_cells(
         ws,
-        rows=range(header_row + 1, data_end_row + 1),
+        rows=range(data_start_row, data_end_row + 1),
         cols=[3, 7, 8, 9, 10, 11, 12],
         number_format="0.0",
     )
-    # Visually highlight the payable-overtime column.
+
+    # Zebra stripes + per-column tints on the 4 important metrics.
+    # MUST run before the payable-OT styling so col 9 can overwrite
+    # the zebra/tint fill with its prominent green treatment.
+    _apply_employee_summary_body_fills(
+        ws, header_row=header_row,
+        data_start=data_start_row, data_end=data_end_row,
+        n_cols=n_cols,
+    )
+
+    # Hero column: Payable Overtime (col 9) -- bolder green + border.
     _apply_payable_overtime_styling(
         ws, payable_col_idx=9,
         header_row=header_row, data_end_row=data_end_row,
     )
+
     # Pin Employee ID column(s) to TEXT (@) so Excel never inserts
-    # thousand separators into the identifier (e.g. 4195162, not
-    # 4,195,162). Run AFTER the numeric formatters above so this is
-    # the last write to those cells.
+    # thousand separators into the identifier. Runs AFTER the numeric
+    # formatters above so this is the last write to those cells.
     _format_employee_id_columns_as_text(
-        ws, header_row=header_row, data_start=header_row + 1,
+        ws, header_row=header_row, data_start=data_start_row,
         data_end=data_end_row, n_cols=n_cols,
     )
-    # Append the Notes block at the bottom.
+
+    # Freeze the header row AND the first two columns so HR can scroll
+    # across many metric columns without losing the row anchor
+    # (Employee ID + First Name) or the column anchor (the wrapped
+    # header band).
+    ws.freeze_panes = f"C{header_row + 1}"
+
+    # Print-friendly: landscape, fit-to-width, repeat banner + header.
+    _apply_employee_summary_print_settings(ws, header_row=header_row)
+
+    # Compact Notes area below the data.
     _append_executive_notes_block(ws, n_cols=n_cols)
 
 
@@ -838,50 +978,256 @@ def _apply_daily_conditional_formatting(ws, df, data_start_row=2):
              font_hex="006100")                              # green
 
 
-def _pie_chart(title, labels, values):
+# ---------------------------------------------------------------------------
+# Chart-polish helpers
+# ---------------------------------------------------------------------------
+# All Dashboard charts share the same visual language so the eye learns
+# the layout once: bold title + smaller italic subtitle + clean axes +
+# right-side legend for pies / no-legend for single-series bars and lines.
+
+def _chart_title(title_text, subtitle_text=None):
+    """Build a `Title` containing the title and an optional subtitle.
+
+    openpyxl renders a chart `Title` as a single text block by default.
+    To get the executive "Title + (subtitle)" look used by Power BI
+    dashboards we hand-build a RichText with TWO paragraphs:
+      P1 = title (bold, larger)
+      P2 = subtitle (italic, smaller, gray)
+    """
+    # Sizes are in 1/100 pt (so sz=1400 -> 14pt, sz=1000 -> 10pt).
+    title_run = RegularTextRun(
+        rPr=CharacterProperties(b=True, sz=1400, solidFill="1F4E79"),
+        t=title_text,
+    )
+    title_p = Paragraph(
+        pPr=ParagraphProperties(
+            defRPr=CharacterProperties(b=True, sz=1400, solidFill="1F4E79"),
+        ),
+        r=[title_run],
+    )
+    paragraphs = [title_p]
+    if subtitle_text:
+        subtitle_run = RegularTextRun(
+            rPr=CharacterProperties(
+                b=False, i=True, sz=1000, solidFill="595959",
+            ),
+            t=subtitle_text,
+        )
+        subtitle_p = Paragraph(
+            pPr=ParagraphProperties(
+                defRPr=CharacterProperties(
+                    b=False, i=True, sz=1000, solidFill="595959",
+                ),
+            ),
+            r=[subtitle_run],
+        )
+        paragraphs.append(subtitle_p)
+    rich = RichText(p=paragraphs)
+    # openpyxl's Title.tx accepts a RichText directly via the 'rich'
+    # attribute of its Text wrapper. Using the Title(tx=...) helper
+    # works across the 3.x line.
+    from openpyxl.chart.data_source import NumDataSource  # noqa: F401
+    from openpyxl.chart.text import Text as ChartTextWrap
+    text = ChartTextWrap()
+    text.rich = rich
+    return Title(tx=text, overlay=False)
+
+
+def _axis_label_text(rotation_60000ths=0, size_100ths=900):
+    """Return a `RichText` for the axis-label text properties.
+
+    `rotation_60000ths` rotates the labels (negative = clockwise).
+    -45 degrees = -2_700_000.
+    `size_100ths` sets the font size in 1/100 pt (so 900 -> 9 pt).
+    """
+    return RichText(
+        bodyPr=RichTextProperties(rot=rotation_60000ths),
+        p=[Paragraph(
+            pPr=ParagraphProperties(
+                defRPr=CharacterProperties(sz=size_100ths),
+            ),
+        )],
+    )
+
+
+def _pie_chart(title, labels, values, subtitle=None):
+    """Pie chart with executive defaults.
+
+    Polish:
+    - Title + small italic subtitle (built via `_chart_title`).
+    - Data labels show ONLY the percentage (no category name) so they
+      stay readable inside small slices. The right-side legend
+      carries the category names, so there is no information loss.
+    - Labels position 'bestFit' lets Excel push tight labels outside
+      the slice automatically (with leader lines) so the 78%/19%
+      block doesn't crowd the tiny 3%/0% slices.
+    - Legend pinned to the right with `overlay=False` so it never
+      sits on top of the slices.
+    """
     chart = PieChart()
-    chart.title = title
+    chart.title = _chart_title(title, subtitle)
     chart.add_data(values, titles_from_data=False)
     chart.set_categories(labels)
     chart.width = _CHART_WIDTH
     chart.height = _CHART_HEIGHT
-    # Show 'Category, percent' (e.g. 'On Time, 78%') and explicitly
-    # hide the series name so labels don't read 'Series1, ...'. The
-    # left-side legend stays redundant-but-helpful for small slices.
     chart.dataLabels = DataLabelList(
-        showCatName=True,
+        showCatName=False,
         showPercent=True,
         showSerName=False,
         showVal=False,
+        showLegendKey=False,
+        dLblPos="bestFit",
     )
+    chart.legend = Legend()
+    chart.legend.position = "r"
+    chart.legend.overlay = False
     return chart
 
 
-def _bar_chart(title, labels, values, horizontal=False):
+def _bar_chart(title, labels, values, horizontal=False, subtitle=None,
+                x_axis_title=None, y_axis_title=None):
+    """Bar chart with executive defaults.
+
+    Polish (for the Dashboard's horizontal bar charts):
+    - Title + italic subtitle (e.g. "By Total Late Hours (Hours)") so
+      HR can read the metric without clicking the chart.
+    - Data labels on EVERY bar, positioned at the bar's outer end
+      (`dLblPos="outEnd"`) so the numeric value sits right next to
+      the bar tip instead of being hidden inside it. This is the #1
+      readability fix per the latest review.
+    - Optional X / Y axis titles -- for horizontal bars the X-axis
+      carries the metric label ("Late Hours (Hours)") and the Y-axis
+      carries the category dimension ("Employee").
+    - Axis tick labels rendered at 9pt so employee names and bar
+      values are legible on a laptop screen.
+    - Single-series bar -- no legend (the title + subtitle already
+      identify the metric; a legend would just steal plot area).
+    """
     chart = BarChart()
     if horizontal:
         chart.type = "bar"
-    chart.title = title
+    chart.title = _chart_title(title, subtitle)
     chart.legend = None
     chart.add_data(values, titles_from_data=False)
     chart.set_categories(labels)
     chart.width = _CHART_WIDTH
     chart.height = _CHART_HEIGHT
+    # Numeric value at the outside end of each bar.
+    chart.dataLabels = DataLabelList(
+        showVal=True,
+        showCatName=False,
+        showSerName=False,
+        showLegendKey=False,
+        dLblPos="outEnd",
+    )
+    if x_axis_title:
+        chart.x_axis.title = x_axis_title
+    if y_axis_title:
+        chart.y_axis.title = y_axis_title
+    # Force category labels (employee names) to render on the "low"
+    # side -- for a horizontal bar chart this is the left, where HR
+    # expects to read them. Without this Excel can flip the labels
+    # to the bar's other end when bars become narrow.
+    chart.y_axis.tickLblPos = "low"
+    chart.x_axis.tickLblPos = "low"
+    # Slightly larger axis label font (9pt) for laptop readability.
+    chart.x_axis.txPr = _axis_label_text(rotation_60000ths=0, size_100ths=900)
+    chart.y_axis.txPr = _axis_label_text(rotation_60000ths=0, size_100ths=900)
     return chart
 
 
-def _line_chart(title, labels, values_with_header):
+def _write_chart_annotation(
+    ws, top_row, col_left, col_right,
+    chart_label, body, accent_primary,
+):
+    """Render a small "How to read" annotation block adjacent to a chart.
+
+    Two cells stacked vertically, merged across `col_left:col_right`:
+        Row N+0 -- "How to read - {chart_label}" on the chart's
+                   section accent colour (white bold text).
+        Row N+1 -- a short italic description that explains what the
+                   chart shows and which direction is "good" vs "bad".
+                   Wrapped, max 2 lines on a laptop screen.
+
+    `accent_primary` should be the same primary colour the chart's
+    section uses elsewhere (e.g. Attendance Risk red for Late charts,
+    Payroll Impact green for Overtime charts) so the eye links the
+    annotation back to its chart.
+    """
+    from openpyxl.utils import column_index_from_string
+    left_idx = column_index_from_string(col_left)
+    right_idx = column_index_from_string(col_right)
+
+    # Title row: bold white on the section accent.
+    ws.merge_cells(
+        start_row=top_row, start_column=left_idx,
+        end_row=top_row, end_column=right_idx,
+    )
+    th = ws.cell(row=top_row, column=left_idx)
+    th.value = f"How to read - {chart_label}"
+    th.font = Font(bold=True, size=10, color="FFFFFF")
+    th.fill = PatternFill("solid", fgColor=accent_primary)
+    th.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[top_row].height = 18
+
+    # Body row: italic small text on a very light gray strip.
+    body_row = top_row + 1
+    ws.merge_cells(
+        start_row=body_row, start_column=left_idx,
+        end_row=body_row, end_column=right_idx,
+    )
+    bc = ws.cell(row=body_row, column=left_idx)
+    bc.value = body
+    bc.font = Font(italic=True, size=9, color="333333")
+    bc.fill = PatternFill("solid", fgColor="F8F8F8")
+    bc.alignment = Alignment(
+        horizontal="left", vertical="top",
+        wrap_text=True, indent=1,
+    )
+    ws.row_dimensions[body_row].height = 30
+
+
+def _line_chart(title, labels, values_with_header,
+                 subtitle=None, x_axis_title=None, y_axis_title=None):
+    """Line chart with executive defaults.
+
+    Polish:
+    - Title + smaller italic subtitle (e.g. "(Number of Late Cases)").
+    - Optional X/Y axis titles -- HR managers can see the units
+      without clicking into the chart ("Date" / "Late Cases").
+    - Major gridlines on the Y-axis make it easy to read off values
+      without hovering each point.
+    - Each data point gets a circle marker so HR can see day-to-day
+      differences even when the line is short / flat.
+    - X-axis labels rotated -45deg so long date strings
+      (2026-05-31) don't overlap each other on a narrow chart.
+    - `varyColors=False` keeps the single-series line one consistent
+      colour instead of cycling theme colours per segment.
+    """
     chart = LineChart()
-    chart.title = title
+    chart.title = _chart_title(title, subtitle)
     chart.legend = None
     chart.add_data(values_with_header, titles_from_data=True)
     chart.set_categories(labels)
     chart.width = _CHART_WIDTH
     chart.height = _CHART_HEIGHT
-    # A single-series line should render as one consistent colour;
-    # Excel otherwise auto-cycles segments through theme colours which
-    # makes the trend look like a rainbow.
     chart.varyColors = False
+    if x_axis_title:
+        chart.x_axis.title = x_axis_title
+    if y_axis_title:
+        chart.y_axis.title = y_axis_title
+    chart.y_axis.majorGridlines = ChartLines()
+    # Markers on each data point.
+    for s in chart.series:
+        s.marker = Marker(symbol="circle", size=7)
+        # Make the line slightly thicker so the trend reads at a glance.
+        s.graphicalProperties = GraphicalProperties(
+            ln=LineProperties(w=22000),  # ~1.75pt in EMU
+        )
+    # Rotate X-axis labels (-45deg) for date readability.
+    chart.x_axis.txPr = _axis_label_text(
+        rotation_60000ths=-2_700_000, size_100ths=900,
+    )
     return chart
 
 
@@ -895,28 +1241,98 @@ def _format_numeric_cells(ws, rows, cols, number_format):
             cell.alignment = align
 
 
-def _build_dashboard(wb, summary, period_start=None, period_end=None):
-    ws = wb["Dashboard"]
-    # Clean executive look: no gridlines.
-    ws.sheet_view.showGridLines = False
+# ---------------------------------------------------------------------------
+# Dashboard layout helpers (Phase 1 executive redesign)
+# ---------------------------------------------------------------------------
+# The Dashboard is laid out in 4 vertical zones for executive readability.
+# All visible content lives within columns A:M (13 columns) so a 4-card
+# row fits the default Excel viewport without horizontal scrolling.
+#
+#   ZONE 1 -- Header                  (rows 1-5)
+#       Big title at row 1 (merged A:M); Reporting Period + Generated
+#       On banner at rows 2-3; spacers at rows 4-5.
+#
+#   ZONE 2 -- Hero KPI cards          (rows 6-10)
+#       Four cards of equal width (3 cols each), tiled A:C / D:F /
+#       G:I / J:L. Column M is a small right-side margin. Cards are
+#       separated by their colored label bands rather than gutters.
+#
+#   ZONE 3 -- Charts                  (rows 11-?)
+#       Five charts in a 2x2+1 grid. Left column anchored at A,
+#       right column anchored at H -- aligns visually with the card
+#       boundaries and stays within the A:M visible window.
+#
+#   ZONE 4 -- Detail KPI sections     (rows 82-?)
+#       Two side-by-side panels (A:F and H:M) for analysts auditing
+#       the executive figures.
+#
+# Backing tables that drive the pie/bar charts live on a SEPARATE
+# hidden helper sheet ("Dashboard Data") -- see
+# `_write_dashboard_backing_tables`. They used to live below row 110
+# of this sheet; moving them to a hidden helper keeps the visible
+# Dashboard area focused on KPIs + charts + sections.
+#
+# Constants below are the single source of truth for these zones.
+_DASH_CARDS_ROW = 6           # top of the 4 hero KPI cards
+_DASH_CARD_HEIGHT = 5         # rows per card
+_DASH_CHARTS_ROW = 11         # top-left chart anchor (row)
+_DASH_CHART_ROW_STRIDE = 22   # vertical gap between successive chart rows
+_DASH_DETAIL_SECTIONS_ROW = 82
+_DASH_HELPER_SHEET_NAME = "Dashboard Data"
 
-    show_period = _has_period(period_start, period_end)
-    # Vertical-shift the entire Dashboard layout when the period banner
-    # is rendered. The banner takes rows 2-4 (period + generated +
-    # spacer), pushing the KPI header from row 3 to row 5 and every
-    # chart anchor down by 2 rows.
-    row_shift = 2 if show_period else 0
+# Per-section accent palette. Each entry is (primary, soft) for the
+# header fill + the soft body fill on the matching detail block.
+_DASH_SECTION_COLORS = {
+    "Workforce":       ("305496", "DDEBF7"),   # corporate blue
+    "Attendance Risk": ("C00000", "F8CBAD"),   # red / peach
+    "Payroll Impact":  ("548235", "E2EFDA"),   # green
+    "Data Quality":    ("BF8F00", "FFF2CC"),   # gold
+}
 
-    # Title bar.
-    ws.merge_cells("A1:O1")
-    title = ws["A1"]
+# Card column anchors. 4 cards x 3 cols each, no inter-card gutter
+# (cards are visually separated by their colored label bands). Total
+# 12 cols (A:L) -- fits inside the visible A:M window with col M as
+# a thin right-side margin.
+_DASH_CARD_COLS = [
+    ("A", "C"),   # Workforce
+    ("D", "F"),   # Attendance Risk
+    ("G", "I"),   # Payroll Impact
+    ("J", "L"),   # Data Quality
+]
+# Detail section columns: 2 panels side-by-side, each 6 cols wide,
+# with column G as the gutter. Stays within A:M.
+_DASH_DETAIL_COLS = [
+    ("A", "F"),   # left detail panel
+    ("H", "M"),   # right detail panel
+]
+# Banner / title merges span A:M.
+_DASH_BANNER_MERGE = ("A", "M")
+
+
+def _write_dashboard_title(ws, period_start, period_end):
+    """Render the Dashboard's header zone (rows 1-5).
+
+    Row 1: large title (`HR Reporting Dashboard`), 24pt bold centered.
+    Row 2-3: Reporting Period banner shared with the other sheets (or
+    the legacy "Generated YYYY-MM-DD HH:MM" subtitle when no period
+    bounds are provided -- preserves the existing tests).
+    Rows 4-5: visual breathing room.
+
+    Returns the row index where downstream content (cards) should
+    start. Always 6 -- the title zone is fixed-height by design.
+    """
+    banner_left, banner_right = _DASH_BANNER_MERGE
+    banner_range = lambda row: f"{banner_left}{row}:{banner_right}{row}"
+
+    ws.merge_cells(banner_range(1))
+    title = ws[f"{banner_left}1"]
     title.value = "HR Reporting Dashboard"
-    title.font = _TITLE_FONT
-    title.alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[1].height = 28
+    title.font = Font(bold=True, size=24, color="1F4E79")
+    title.alignment = Alignment(horizontal="center", vertical="center")
+    title.fill = PatternFill("solid", fgColor="F2F2F2")
+    ws.row_dimensions[1].height = 38
 
-    if show_period:
-        # Row 2: Reporting Period (matches the banner used on other sheets).
+    if _has_period(period_start, period_end):
         start_text = _format_period_date(period_start)
         end_text = _format_period_date(period_end)
         if start_text and end_text:
@@ -927,167 +1343,255 @@ def _build_dashboard(wb, summary, period_start=None, period_end=None):
             period_text = f"Reporting Period: through {end_text}"
         else:
             period_text = "Reporting Period: full attendance file"
-        ws.merge_cells("A2:O2")
-        period_cell = ws["A2"]
-        period_cell.value = period_text
-        period_cell.font = _PERIOD_FONT
-        period_cell.alignment = Alignment(horizontal="center", vertical="center")
-        period_cell.fill = _PERIOD_HEADER_FILL
+        ws.merge_cells(banner_range(2))
+        c = ws[f"{banner_left}2"]
+        c.value = period_text
+        c.font = _PERIOD_FONT
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.fill = _PERIOD_HEADER_FILL
         ws.row_dimensions[2].height = 26
 
-        # Row 3: Generated timestamp.
-        ws.merge_cells("A3:O3")
-        gen_cell = ws["A3"]
-        gen_cell.value = (
+        ws.merge_cells(banner_range(3))
+        g = ws[f"{banner_left}3"]
+        g.value = (
             f"Generated On: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
         )
-        gen_cell.font = _PERIOD_TIMESTAMP_FONT
-        gen_cell.alignment = Alignment(horizontal="center", vertical="center")
-        gen_cell.fill = _PERIOD_TIMESTAMP_FILL
+        g.font = _PERIOD_TIMESTAMP_FONT
+        g.alignment = Alignment(horizontal="center", vertical="center")
+        g.fill = _PERIOD_TIMESTAMP_FILL
         ws.row_dimensions[3].height = 18
 
-        # Row 4: blank spacer.
         ws.row_dimensions[4].height = 6
     else:
-        # Subtitle with the report timestamp -- helps HR confirm freshness
-        # when the workbook is forwarded or archived.
-        ws.merge_cells("A2:O2")
-        subtitle = ws["A2"]
+        # Legacy subtitle path -- callers that don't pass period bounds
+        # still get a useful "Generated" line at row 2 (matches the
+        # contract used by older callers and the matching tests).
+        ws.merge_cells(banner_range(2))
+        subtitle = ws[f"{banner_left}2"]
         subtitle.value = (
             f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
         subtitle.font = Font(italic=True, color="555555", size=10)
         subtitle.alignment = Alignment(horizontal="left", vertical="center")
 
-    # ---------------- Executive KPIs (cols A-B) ----------------
-    kpis = [
-        ("Reporting Population",
-         summary.get("reporting_population", summary.get("total_employees", 0)),
-         "#,##0"),
-        ("Data Quality Score", summary.get("data_quality_score", 0), "0.0"),
-        ("Late Cases", summary["late_cases"], "#,##0"),
-        ("Total Late Minutes (Unexcused)", summary["total_late_minutes"], "#,##0"),
-        ("Approved Excuse Cases", summary["approved_excuse_cases"], "#,##0"),
-        ("Leave Cases", summary["leave_cases"], "#,##0"),
-        ("Missing Schedule Cases", summary["missing_schedule_cases"], "#,##0"),
-        ("Missing Check-Out Cases", summary["missing_check_out_cases"], "#,##0"),
-        ("High Risk Employees", summary.get("high_risk_employees", 0), "#,##0"),
-        ("Excluded Employees", summary.get("excluded_employee_count", 0), "#,##0"),
-        ("Estimated Deduction (capped)", summary.get("total_deduction_capped", 0),
-         "#,##0.00"),
-        ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
-        ("Total Over Time (Hours) (Actual)",
-         summary.get("total_overtime_hours", 0), "0.0"),
-        ("Overtime Multiplier",
-         summary.get("overtime_multiplier", 1.0), "0.00"),
-        ("Total Over Time (Payable 1.5x) (Hours)",
-         summary.get("total_overtime_payable_hours", 0), "0.00"),
-        ("Early Leave Cases", summary.get("early_leave_cases", 0), "#,##0"),
-        ("Total Early Leave Minutes", summary.get("total_early_leave_minutes", 0), "#,##0"),
-        ("Early Leave Anomalies (review)",
-         summary.get("early_leave_anomaly_cases", 0), "#,##0"),
-        # Break analytics -- INFORMATIONAL only, no charts.
-        ("Total Break Count (info)", summary.get("total_break_count", 0), "#,##0"),
-        ("Total Break Minutes (info)", summary.get("total_break_minutes", 0), "#,##0"),
-        ("Employees With Breaks (info)",
-         summary.get("employees_with_breaks", 0), "#,##0"),
-        ("Incomplete Break Records (info)",
-         summary.get("incomplete_break_records", 0), "#,##0"),
-        # Employee ID alias mapping -- INFORMATIONAL.
-        ("Aliases Used (info)",
-         summary.get("employee_id_aliases_used", 0), "#,##0"),
-        ("Alias Records Mapped (info)",
-         summary.get("employee_id_alias_records_mapped", 0), "#,##0"),
-    ]
-    kpi_header_row = 3 + row_shift  # row 3 by default, row 5 with banner
-    kpi_data_start = kpi_header_row + 1
-    ws.cell(row=kpi_header_row, column=1, value="Metric")
-    ws.cell(row=kpi_header_row, column=2, value="Value")
-    _style_header_row(ws, row=kpi_header_row, n_cols=2)
+    return _DASH_CARDS_ROW
+
+
+def _write_kpi_card(ws, top_row, col_left, col_right,
+                     section_label, descriptor, value, number_format,
+                     accent_primary, accent_soft):
+    """Render one of the 4 hero KPI cards.
+
+    Card layout (5 rows tall, 3 columns wide):
+        Row N+0  -- section_label (e.g. "WORKFORCE"), white bold on
+                    the section's primary fill colour.
+        Row N+1..N+3 -- the big value, merged across three rows for
+                    visual mass. 28pt bold, centered.
+        Row N+4  -- descriptor (e.g. "Reporting Population"), small
+                    grey text on a soft variant of the accent colour.
+
+    Cells are merged across `col_left:col_right` so the card spans
+    the full assigned column range regardless of column width.
+    """
+    primary_fill = PatternFill("solid", fgColor=accent_primary)
+    soft_fill = PatternFill("solid", fgColor=accent_soft)
     centered = Alignment(horizontal="center", vertical="center")
-    # Zebra striping for the KPI block + green accent for the payable
-    # overtime KPI so it visually matches the Employee Summary
-    # highlight. Yellow-tinted accent for the data-quality score.
-    band = PatternFill("solid", fgColor="F2F2F2")
-    payable_accent = PatternFill("solid", fgColor="E2EFDA")
-    dq_accent = PatternFill("solid", fgColor="FFF2CC")
-    accent_labels = {"Total Over Time (Payable 1.5x) (Hours)": payable_accent,
-                     "Data Quality Score": dq_accent}
-    for i, (label, value, fmt) in enumerate(kpis, start=kpi_data_start):
-        label_cell = ws.cell(row=i, column=1, value=label)
-        cell = ws.cell(row=i, column=2, value=value)
-        cell.number_format = fmt
-        cell.alignment = centered
-        accent = accent_labels.get(label)
-        if accent is not None:
-            label_cell.fill = accent
-            cell.fill = accent
-            label_cell.font = Font(bold=True)
-            cell.font = Font(bold=True)
-        elif (i - kpi_data_start) % 2 == 1:  # alternate-row band
-            label_cell.fill = band
-            cell.fill = band
 
-    # ---------------- Backing tables (placed below the charts) ----------------
-    # Each chart is 13cm x 7cm (~18 rows tall). Three chart rows anchored
-    # at the chart anchor rows below cover roughly 56 rows, so data tables
-    # start safely 2 rows further down.
-    DATA_START = 60 + row_shift
-    section_label = ws.cell(row=DATA_START, column=1, value="Underlying Data")
-    section_label.font = _SECTION_FONT
+    # Row N+0: section label band.
+    label_range = f"{col_left}{top_row}:{col_right}{top_row}"
+    ws.merge_cells(label_range)
+    lab = ws[f"{col_left}{top_row}"]
+    lab.value = section_label.upper()
+    lab.font = Font(bold=True, color="FFFFFF", size=11)
+    lab.alignment = centered
+    lab.fill = primary_fill
+    ws.row_dimensions[top_row].height = 22
 
-    # Attendance Status table (drives Chart 1).
-    ws.cell(row=DATA_START + 1, column=1,
-            value="Attendance Status").font = _SECTION_FONT
+    # Rows N+1..N+3: value (merged 3 rows tall for visual weight).
+    value_range = f"{col_left}{top_row + 1}:{col_right}{top_row + 3}"
+    ws.merge_cells(value_range)
+    v = ws[f"{col_left}{top_row + 1}"]
+    v.value = value
+    v.number_format = number_format
+    v.font = Font(bold=True, size=28, color="1F4E79")
+    v.alignment = centered
+    v.fill = soft_fill
+    for r in (top_row + 1, top_row + 2, top_row + 3):
+        ws.row_dimensions[r].height = 20
+
+    # Row N+4: descriptor.
+    desc_range = f"{col_left}{top_row + 4}:{col_right}{top_row + 4}"
+    ws.merge_cells(desc_range)
+    d = ws[f"{col_left}{top_row + 4}"]
+    d.value = descriptor
+    d.font = Font(italic=True, color="555555", size=10)
+    d.alignment = centered
+    d.fill = soft_fill
+    ws.row_dimensions[top_row + 4].height = 18
+
+
+def _write_kpi_section(ws, start_row, col_left, col_right,
+                        title, accent_primary, accent_soft, metrics):
+    """Render a section header band + a vertical list of (label,
+    value, number_format) tuples.
+
+    Lays out one of the four detail panels (Workforce / Attendance
+    Risk / Payroll Impact / Data Quality) as a small 2-column table:
+    the LEFT half of the merged cell range carries the metric label,
+    the RIGHT half carries the value. Zebra striping is applied to
+    every other body row for readability.
+
+    Returns the row right after the last written row (1 blank gap).
+    """
+    from openpyxl.utils import column_index_from_string, get_column_letter
+    centered = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center", indent=1)
+    band = PatternFill("solid", fgColor="F8F8F8")
+    primary_fill = PatternFill("solid", fgColor=accent_primary)
+    soft_fill = PatternFill("solid", fgColor=accent_soft)
+
+    # Title band (full width of the panel).
+    title_range = f"{col_left}{start_row}:{col_right}{start_row}"
+    ws.merge_cells(title_range)
+    th = ws[f"{col_left}{start_row}"]
+    th.value = title
+    th.font = Font(bold=True, color="FFFFFF", size=12)
+    th.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    th.fill = primary_fill
+    ws.row_dimensions[start_row].height = 22
+
+    # Body rows: split panel into label + value columns at midpoint.
+    left_idx = column_index_from_string(col_left)
+    right_idx = column_index_from_string(col_right)
+    mid_idx = (left_idx + right_idx) // 2
+    label_left, label_right = col_left, get_column_letter(mid_idx)
+    value_left, value_right = get_column_letter(mid_idx + 1), col_right
+
+    for i, (label, value, fmt) in enumerate(metrics):
+        r = start_row + 1 + i
+        # Label half.
+        ws.merge_cells(f"{label_left}{r}:{label_right}{r}")
+        lc = ws[f"{label_left}{r}"]
+        lc.value = label
+        lc.font = Font(size=10)
+        lc.alignment = left_align
+        # Value half.
+        ws.merge_cells(f"{value_left}{r}:{value_right}{r}")
+        vc = ws[f"{value_left}{r}"]
+        vc.value = value
+        vc.number_format = fmt
+        vc.font = Font(bold=True, size=10)
+        vc.alignment = centered
+        if i % 2 == 1:
+            lc.fill = band
+            vc.fill = band
+        ws.row_dimensions[r].height = 18
+
+    # Light coloured underline row to visually close the panel.
+    end_row = start_row + 1 + len(metrics)
+    ws.merge_cells(f"{col_left}{end_row}:{col_right}{end_row}")
+    end_cell = ws[f"{col_left}{end_row}"]
+    end_cell.fill = soft_fill
+    ws.row_dimensions[end_row].height = 4
+    return end_row + 1   # +1 for visual gap
+
+
+def _write_dashboard_backing_tables(wb, summary):
+    """Write the 3 backing tables to a HIDDEN helper sheet.
+
+    Why: the pie/bar charts on the Dashboard reference these rows via
+    openpyxl `Reference` objects. Keeping them on the Dashboard itself
+    forced an "Underlying Data" zone at the bottom of the visible
+    sheet, cluttering the executive view. The polish pass moves them
+    onto a dedicated `Dashboard Data` sheet that is created on demand,
+    marked hidden, and never seen by HR/payroll users -- it shows up
+    in Excel's "Unhide sheet" dialog if anyone genuinely needs to
+    audit the chart inputs.
+
+    Returns a dict that includes the helper worksheet plus the row
+    ranges for each table so `_write_dashboard_charts` can build
+    cross-sheet `Reference` objects:
+
+        {
+          "ws": <helper Worksheet>,
+          "status":      (data_start, data_end, n_cols),
+          "overtime":    (data_start, data_end, simplified_df),
+          "early_leave": (data_start, data_end, simplified_df),
+        }
+    """
+    if _DASH_HELPER_SHEET_NAME in wb.sheetnames:
+        helper = wb[_DASH_HELPER_SHEET_NAME]
+    else:
+        helper = wb.create_sheet(_DASH_HELPER_SHEET_NAME)
+    helper.sheet_state = "hidden"
+    helper.sheet_view.showGridLines = False
+
+    cursor = 1
+    helper.cell(row=cursor, column=1,
+                value="Underlying Data (used by Dashboard charts)").font = (
+        _SECTION_FONT
+    )
+    cursor += 2
+
+    # Attendance Status (drives the pie chart).
+    helper.cell(row=cursor, column=1,
+                value="Attendance Status").font = _SECTION_FONT
     status_df = summary["status_summary"]
-    _, status_data_start, status_data_end, status_next, status_n_cols = _write_dataframe(
-        ws, status_df, DATA_START + 2
+    _, status_start, status_end, status_next, status_n_cols = _write_dataframe(
+        helper, status_df, cursor + 1,
     )
     _format_numeric_cells(
-        ws,
-        rows=range(status_data_start, status_data_end + 1),
+        helper,
+        rows=range(status_start, status_end + 1),
         cols=range(2, status_n_cols + 1),
         number_format="#,##0",
     )
 
-    # Top Overtime table (simplified). Drives Chart 4.
+    # Top Overtime (drives the bar chart).
+    # The chart's title/subtitle/X-axis title all promise PAYABLE
+    # OVERTIME HOURS at the 1.5x multiplier. The backing table must
+    # therefore expose `total_overtime_payable_hours` so the chart
+    # Reference can point at the right unit. Earlier versions of this
+    # function only carried minutes + actual-hours and the chart was
+    # silently plotting minutes under a "Hours" title -- off by 60x.
+    overtime_cols = [
+        "Employee ID", "First Name",
+        "total_overtime_minutes", "total_overtime_hours",
+        "total_overtime_payable_minutes", "total_overtime_payable_hours",
+    ]
     top_overtime_full = summary.get("top_overtime_employees")
     if top_overtime_full is not None and not top_overtime_full.empty:
-        simplified_overtime = top_overtime_full[[
-            "Employee ID", "First Name",
-            "total_overtime_minutes", "total_overtime_hours",
-        ]].head(10).copy()
+        # Fallback path: when the upstream aggregate doesn't have the
+        # payable columns (e.g. multiplier disabled in a non-default
+        # config) fill them with NaN so the chart renders cleanly
+        # without crashing AND without lying about the unit.
+        simplified_overtime = top_overtime_full.head(10).copy()
+        for col in overtime_cols:
+            if col not in simplified_overtime.columns:
+                simplified_overtime[col] = pd.NA
+        simplified_overtime = simplified_overtime[overtime_cols]
     else:
-        simplified_overtime = pd.DataFrame(columns=[
-            "Employee ID", "First Name",
-            "total_overtime_minutes", "total_overtime_hours",
-        ])
-    ws.cell(row=status_next, column=1,
-            value="Top Overtime Employees").font = _SECTION_FONT
-    _, ot_data_start, ot_data_end, ot_next, _ = _write_dataframe(
-        ws, simplified_overtime, status_next + 1
+        simplified_overtime = pd.DataFrame(columns=overtime_cols)
+    helper.cell(row=status_next, column=1,
+                value="Top Overtime Employees").font = _SECTION_FONT
+    _, ot_start, ot_end, ot_next, _ = _write_dataframe(
+        helper, simplified_overtime, status_next + 1,
     )
     if not simplified_overtime.empty:
-        # total_overtime_minutes col 3 uses integer thousands format;
-        # total_overtime_hours col 4 uses one decimal. Employee ID
-        # (col 1) is intentionally excluded -- _write_dataframe already
-        # pinned it to TEXT (@) so Excel does not render commas in
-        # the identifier (4195162, not 4,195,162).
+        # Integer minutes columns (3, 5) -- thousand separators.
         _format_numeric_cells(
-            ws,
-            rows=range(ot_data_start, ot_data_end + 1),
-            cols=[3],
-            number_format="#,##0",
+            helper, rows=range(ot_start, ot_end + 1),
+            cols=[3, 5], number_format="#,##0",
         )
+        # Hour columns (4, 6) -- 1 decimal place. The chart Reference
+        # below points at column 6 (`total_overtime_payable_hours`) so
+        # the bar data labels also render with 1 decimal precision.
         _format_numeric_cells(
-            ws,
-            rows=range(ot_data_start, ot_data_end + 1),
-            cols=[4],
-            number_format="0.0",
+            helper, rows=range(ot_start, ot_end + 1),
+            cols=[4, 6], number_format="0.0",
         )
 
-    # Top Early Leave table -- mirrors the Top Overtime layout: 4 cols
-    # ending with the hours conversion for an executive-friendly read.
+    # Top Early Leave (drives the bar chart).
     top_el_full = summary.get("top_early_leave_employees")
     el_cols = [
         "Employee ID", "First Name",
@@ -1097,52 +1601,69 @@ def _build_dashboard(wb, summary, period_start=None, period_end=None):
         simplified_el = top_el_full[el_cols].head(10).copy()
     else:
         simplified_el = pd.DataFrame(columns=el_cols)
-    ws.cell(row=ot_next, column=1,
-            value="Top Early Leave Employees").font = _SECTION_FONT
-    _, el_data_start, el_data_end, _, _ = _write_dataframe(
-        ws, simplified_el, ot_next + 1
+    helper.cell(row=ot_next, column=1,
+                value="Top Early Leave Employees").font = _SECTION_FONT
+    _, el_start, el_end, _, _ = _write_dataframe(
+        helper, simplified_el, ot_next + 1,
     )
     if not simplified_el.empty:
-        # Employee ID (col 1) intentionally excluded -- already pinned
-        # to TEXT (@) by _write_dataframe to suppress comma separators.
         _format_numeric_cells(
-            ws,
-            rows=range(el_data_start, el_data_end + 1),
-            cols=[3],
-            number_format="#,##0",
+            helper, rows=range(el_start, el_end + 1),
+            cols=[3], number_format="#,##0",
         )
         _format_numeric_cells(
-            ws,
-            rows=range(el_data_start, el_data_end + 1),
-            cols=[4],
-            number_format="0.0",
+            helper, rows=range(el_start, el_end + 1),
+            cols=[4], number_format="0.0",
         )
 
-    # ---------------- Charts: 2x2+1 grid (anchors leave visual buffer) ----------------
-    # Layout: anchors live at C5 / K5 / C24 / K24 / C43 by default; when
-    # the Reporting Period banner is rendered (`row_shift = 2`) the
-    # entire grid drops to C7 / K7 / C26 / K26 / C45 so the pie title
-    # does NOT collide with the KPI header. Each chart is 13cm x 7cm.
-    chart_anchor = lambda row: f"{{col}}{row + row_shift}"  # not used; explicit below
-    anchor_tl = f"C{5 + row_shift}"   # top-left  (Attendance Status pie)
-    anchor_tr = f"K{5 + row_shift}"   # top-right (Daily Late Trend)
-    anchor_ml = f"C{24 + row_shift}"  # middle-left (Top Late)
-    anchor_mr = f"K{24 + row_shift}"  # middle-right (Top Overtime)
-    anchor_bl = f"C{43 + row_shift}"  # bottom-left (Top Early Leave)
+    return {
+        "ws": helper,
+        "status":      (status_start, status_end, status_n_cols),
+        "overtime":    (ot_start, ot_end, simplified_overtime),
+        "early_leave": (el_start, el_end, simplified_el),
+    }
 
-    # Cross-sheet header offsets: the Employee Summary / Daily Trend
-    # sheets carry their OWN period banner when the dashboard does, so
-    # their data rows live at row 5+ instead of row 2+. Compute the
-    # first-data-row for each sheet from its actual header.
-    other_sheet_first_data_row = _PERIOD_BLOCK_ROWS + 2 if show_period else 2
+
+def _write_dashboard_charts(ws, wb, backing, other_sheet_first_data_row):
+    """Add the 5 chart objects.
+
+    Anchors align with the new card grid (cards in A:L within A:M):
+        anchor_tl ("A{row}")   above cards 1-2     (Attendance Status pie)
+        anchor_tr ("H{row}")   above cards 3-4     (Daily Late Trend line)
+        anchor_ml ("A{row+s}") second-row left     (Top Late bar)
+        anchor_mr ("H{row+s}") second-row right    (Top Overtime bar)
+        anchor_bl ("A{row+2s}") third-row left     (Top Early Leave bar)
+    Charts are 16cm x 9cm so each row of charts is ~22 rows tall;
+    `_DASH_CHART_ROW_STRIDE` keeps them spaced cleanly.
+
+    `backing` is the dict returned by
+    `_write_dashboard_backing_tables`; its `ws` is the HIDDEN helper
+    sheet, so on-sheet refs point there (not at the visible Dashboard).
+    """
+    base = _DASH_CHARTS_ROW
+    stride = _DASH_CHART_ROW_STRIDE
+    anchor_tl = f"A{base}"
+    anchor_tr = f"H{base}"
+    anchor_ml = f"A{base + stride}"
+    anchor_mr = f"H{base + stride}"
+    anchor_bl = f"A{base + 2 * stride}"
+
+    helper_ws = backing["ws"]
+    status_start, status_end, _ = backing["status"]
+    ot_start, ot_end, simplified_overtime = backing["overtime"]
+    el_start, el_end, simplified_el = backing["early_leave"]
 
     # Chart 1 (top-left): Attendance Status pie.
-    pie_labels = Reference(ws, min_col=1,
-                           min_row=status_data_start, max_row=status_data_end)
-    pie_values = Reference(ws, min_col=2,
-                           min_row=status_data_start, max_row=status_data_end)
+    pie_labels = Reference(helper_ws, min_col=1,
+                           min_row=status_start, max_row=status_end)
+    pie_values = Reference(helper_ws, min_col=2,
+                           min_row=status_start, max_row=status_end)
     ws.add_chart(
-        _pie_chart("Attendance Status Breakdown", pie_labels, pie_values),
+        _pie_chart(
+            "Attendance Status Breakdown",
+            pie_labels, pie_values,
+            subtitle="(Distribution %)",
+        ),
         anchor_tl,
     )
 
@@ -1152,30 +1673,30 @@ def _build_dashboard(wb, summary, period_start=None, period_end=None):
         trend_first_data = other_sheet_first_data_row
         trend_header_row = trend_first_data - 1
         if trend_ws.max_row >= trend_first_data:
-            # Daily Trend cols: 1=Date, 2=total_records, 3=late_cases, ...
             trend_labels = Reference(
                 trend_ws, min_col=1,
                 min_row=trend_first_data, max_row=trend_ws.max_row,
             )
-            # titles_from_data=True -> include the header row for series name.
             trend_values = Reference(
                 trend_ws, min_col=3,
                 min_row=trend_header_row, max_row=trend_ws.max_row,
             )
             ws.add_chart(
-                _line_chart("Daily Late Trend", trend_labels, trend_values),
+                _line_chart(
+                    "Daily Late Trend",
+                    trend_labels, trend_values,
+                    subtitle="(Number of Late Cases)",
+                    x_axis_title="Date",
+                    y_axis_title="Late Cases",
+                ),
                 anchor_tr,
             )
 
-    # Chart 3 (middle-left): Top Late Employees -- references the
-    # simplified Employee Summary sheet which is sorted by
-    # Total Late (Hours) desc.
+    # Chart 3 (middle-left): Top Late Employees -- references Employee Summary.
     emp_ws = wb["Employee Summary"]
     emp_first_data = other_sheet_first_data_row
     if emp_ws.max_row >= emp_first_data:
         n_late = min(10, emp_ws.max_row - emp_first_data + 1)
-        # Executive sheet cols: 1=Employee ID, 2=First Name,
-        # 3=Absence, ..., 7=Total Late (Hours), ...
         late_labels = Reference(
             emp_ws, min_col=2,
             min_row=emp_first_data, max_row=emp_first_data + n_late - 1,
@@ -1185,44 +1706,240 @@ def _build_dashboard(wb, summary, period_start=None, period_end=None):
             min_row=emp_first_data, max_row=emp_first_data + n_late - 1,
         )
         ws.add_chart(
-            _bar_chart("Top Late Employees", late_labels, late_values,
-                       horizontal=True),
+            _bar_chart(
+                "Top Late Employees", late_labels, late_values,
+                horizontal=True,
+                subtitle="By Total Late Hours (Hours)",
+                x_axis_title="Late Hours (Hours)",
+            ),
             anchor_ml,
         )
 
     # Chart 4 (middle-right): Top Overtime Employees.
-    if ot_data_end >= ot_data_start and not simplified_overtime.empty:
-        ot_labels = Reference(ws, min_col=2,
-                              min_row=ot_data_start, max_row=ot_data_end)
-        ot_values = Reference(ws, min_col=3,
-                              min_row=ot_data_start, max_row=ot_data_end)
+    # IMPORTANT: the value Reference MUST point at column 6
+    # (`total_overtime_payable_hours`), not column 3 (minutes). The
+    # chart's title, subtitle, and X-axis title all promise PAYABLE
+    # HOURS at the 1.5x multiplier; plotting minutes under that label
+    # was a 60x unit error caught in the accuracy audit.
+    if ot_end >= ot_start and not simplified_overtime.empty:
+        ot_labels = Reference(helper_ws, min_col=2,
+                              min_row=ot_start, max_row=ot_end)
+        ot_values = Reference(helper_ws, min_col=6,
+                              min_row=ot_start, max_row=ot_end)
         ws.add_chart(
-            _bar_chart("Top Overtime Employees", ot_labels, ot_values,
-                       horizontal=True),
+            _bar_chart(
+                "Top Overtime Employees", ot_labels, ot_values,
+                horizontal=True,
+                subtitle="By Total Overtime Hours (Payable 1.5x)",
+                x_axis_title="Overtime Hours (Payable 1.5x)",
+            ),
             anchor_mr,
         )
 
     # Chart 5 (bottom-left): Top Early Leave Employees.
-    if el_data_end >= el_data_start and not simplified_el.empty:
-        el_labels = Reference(ws, min_col=2,
-                              min_row=el_data_start, max_row=el_data_end)
-        el_values = Reference(ws, min_col=3,
-                              min_row=el_data_start, max_row=el_data_end)
+    if el_end >= el_start and not simplified_el.empty:
+        el_labels = Reference(helper_ws, min_col=2,
+                              min_row=el_start, max_row=el_end)
+        el_values = Reference(helper_ws, min_col=3,
+                              min_row=el_start, max_row=el_end)
         ws.add_chart(
-            _bar_chart("Top Early Leave Employees", el_labels, el_values,
-                       horizontal=True),
+            _bar_chart(
+                "Top Early Leave Employees", el_labels, el_values,
+                horizontal=True,
+                subtitle="By Total Early Leave Minutes",
+                x_axis_title="Early Leave Minutes",
+            ),
             anchor_bl,
         )
 
-    # ---------------- Column widths + freeze ----------------
-    ws.column_dimensions["A"].width = 38
-    ws.column_dimensions["B"].width = 18
-    for letter in ("C", "D", "E", "F", "G", "H", "I",
-                   "J", "K", "L", "M", "N", "O", "P", "Q"):
-        ws.column_dimensions[letter].width = 11
-    # Pin the title row and KPI header so they stay visible when scrolling.
-    # Default: freeze below KPI header at A4. With banner: A6.
-    ws.freeze_panes = f"A{kpi_data_start}"
+    # ---- "How to read" annotations for the 3 bar charts --------------
+    # Positioned just below each chart row, inside the gap between the
+    # chart's bottom edge and the next chart-row anchor. Accent colour
+    # ties each annotation back to its KPI section (Attendance Risk
+    # red for late metrics, Payroll Impact green for overtime).
+    risk_primary, _ = _DASH_SECTION_COLORS["Attendance Risk"]
+    payroll_primary, _ = _DASH_SECTION_COLORS["Payroll Impact"]
+    # Charts in chart-row 2 (anchored at base+stride) extend ~18 rows
+    # downward; place annotation 2 rows below the anchor + chart span.
+    annotation_row_2 = base + stride + 18
+    annotation_row_3 = base + 2 * stride + 18
+    _write_chart_annotation(
+        ws, top_row=annotation_row_2,
+        col_left="A", col_right="F",
+        chart_label="Top Late Employees",
+        body=(
+            "Shows the 10 employees with the highest total late hours "
+            "during the reporting period. Higher is worse -- these "
+            "names drive the Attendance Risk KPI on the cards above."
+        ),
+        accent_primary=risk_primary,
+    )
+    _write_chart_annotation(
+        ws, top_row=annotation_row_2,
+        col_left="H", col_right="M",
+        chart_label="Top Overtime Employees",
+        body=(
+            "Shows the 10 employees with the highest payable overtime "
+            "hours (1.5x multiplier applied). Higher means higher "
+            "payroll impact -- these drive the Payroll Impact KPI."
+        ),
+        accent_primary=payroll_primary,
+    )
+    _write_chart_annotation(
+        ws, top_row=annotation_row_3,
+        col_left="A", col_right="F",
+        chart_label="Top Early Leave Employees",
+        body=(
+            "Shows the 10 employees with the highest total early-leave "
+            "minutes during the reporting period. Excused minutes have "
+            "already been subtracted (only unexcused early leave shown)."
+        ),
+        accent_primary=risk_primary,
+    )
+
+
+def _build_dashboard(wb, summary, period_start=None, period_end=None):
+    """Compose the Dashboard sheet from small, focused helpers.
+
+    Layout (executive-friendly, top-to-bottom):
+      1. Title + Reporting Period banner   (rows 1-5)
+      2. 4 hero KPI cards                  (rows 6-10)
+      3. Charts (5-up grid)                (rows 12-68)
+      4. Detail KPI sections (A/B/C/D)     (rows 70-104)
+      5. Underlying Data backing tables    (rows 110+)
+    """
+    ws = wb["Dashboard"]
+    # Clean executive look: no gridlines anywhere on the dashboard.
+    ws.sheet_view.showGridLines = False
+
+    # ----- Zone 1: Title + Reporting Period banner --------------------
+    cards_row = _write_dashboard_title(ws, period_start, period_end)
+
+    # ----- Zone 2: 4 hero KPI cards -----------------------------------
+    # Pick the single MOST important metric per section. Detail metrics
+    # within each section are surfaced in Zone 4 below.
+    hero_metrics = [
+        ("Workforce",       "Reporting Population",
+         summary.get("reporting_population",
+                     summary.get("total_employees", 0)),
+         "#,##0"),
+        ("Attendance Risk", "Late Cases",
+         summary.get("late_cases", 0), "#,##0"),
+        ("Payroll Impact",  "Total Over Time (Payable 1.5x) (Hours)",
+         summary.get("total_overtime_payable_hours", 0), "0.00"),
+        ("Data Quality",    "Data Quality Score",
+         summary.get("data_quality_score", 0), "0.0"),
+    ]
+    for (col_left, col_right), (section, descriptor, value, fmt) in zip(
+        _DASH_CARD_COLS, hero_metrics,
+    ):
+        primary, soft = _DASH_SECTION_COLORS[section]
+        _write_kpi_card(
+            ws, top_row=cards_row,
+            col_left=col_left, col_right=col_right,
+            section_label=section, descriptor=descriptor,
+            value=value, number_format=fmt,
+            accent_primary=primary, accent_soft=soft,
+        )
+
+    # ----- Zone 3: Charts -- written AFTER backing tables exist -------
+    # Backing tables must exist BEFORE chart objects can reference
+    # their cells. They are written to a HIDDEN helper sheet
+    # ("Dashboard Data") so they no longer occupy visible rows on
+    # the Dashboard itself.
+    backing = _write_dashboard_backing_tables(wb, summary)
+    show_period = _has_period(period_start, period_end)
+    other_sheet_first_data_row = _PERIOD_BLOCK_ROWS + 2 if show_period else 2
+    _write_dashboard_charts(ws, wb, backing, other_sheet_first_data_row)
+
+    # ----- Zone 4: Detail KPI sections (A/B/C/D) ----------------------
+    sections = [
+        ("A. Workforce", "Workforce", [
+            ("Reporting Population",
+             summary.get("reporting_population",
+                         summary.get("total_employees", 0)),
+             "#,##0"),
+            ("Excluded Employees",
+             summary.get("excluded_employee_count", 0), "#,##0"),
+            ("Aliases Used",
+             summary.get("employee_id_aliases_used", 0), "#,##0"),
+        ]),
+        ("B. Attendance Risk", "Attendance Risk", [
+            ("Late Cases", summary.get("late_cases", 0), "#,##0"),
+            ("Total Late Minutes (Unexcused)",
+             summary.get("total_late_minutes", 0), "#,##0"),
+            ("Approved Excuse Cases",
+             summary.get("approved_excuse_cases", 0), "#,##0"),
+            ("Leave Cases", summary.get("leave_cases", 0), "#,##0"),
+            ("High Risk Employees",
+             summary.get("high_risk_employees", 0), "#,##0"),
+            ("Missing Check-Out Cases",
+             summary.get("missing_check_out_cases", 0), "#,##0"),
+            ("Early Leave Cases",
+             summary.get("early_leave_cases", 0), "#,##0"),
+            ("Total Early Leave Minutes",
+             summary.get("total_early_leave_minutes", 0), "#,##0"),
+            ("Early Leave Anomalies (review)",
+             summary.get("early_leave_anomaly_cases", 0), "#,##0"),
+        ]),
+        ("C. Payroll Impact", "Payroll Impact", [
+            ("Overtime Cases", summary.get("overtime_cases", 0), "#,##0"),
+            ("Total Over Time (Hours) (Actual)",
+             summary.get("total_overtime_hours", 0), "0.0"),
+            ("Overtime Multiplier",
+             summary.get("overtime_multiplier", 1.0), "0.00"),
+            ("Total Over Time (Payable 1.5x) (Hours)",
+             summary.get("total_overtime_payable_hours", 0), "0.00"),
+            ("Estimated Deduction (capped)",
+             summary.get("total_deduction_capped", 0), "#,##0.00"),
+        ]),
+        ("D. Data Quality / Notes", "Data Quality", [
+            ("Data Quality Score",
+             summary.get("data_quality_score", 0), "0.0"),
+            ("Missing Schedule Cases",
+             summary.get("missing_schedule_cases", 0), "#,##0"),
+            ("Total Break Count (info)",
+             summary.get("total_break_count", 0), "#,##0"),
+            ("Total Break Minutes (info)",
+             summary.get("total_break_minutes", 0), "#,##0"),
+            ("Employees With Breaks (info)",
+             summary.get("employees_with_breaks", 0), "#,##0"),
+            ("Incomplete Break Records (info)",
+             summary.get("incomplete_break_records", 0), "#,##0"),
+            ("Alias Records Mapped (info)",
+             summary.get("employee_id_alias_records_mapped", 0), "#,##0"),
+        ]),
+    ]
+    # Lay out the 4 sections in a 2x2 grid: A and B side-by-side, then
+    # C and D side-by-side below them. The left/right vertical cursors
+    # advance independently so sections of unequal length never overlap.
+    left_cursor = right_cursor = _DASH_DETAIL_SECTIONS_ROW
+    for idx, (title, section_key, metrics) in enumerate(sections):
+        primary, soft = _DASH_SECTION_COLORS[section_key]
+        col_left, col_right = _DASH_DETAIL_COLS[idx % 2]
+        row = left_cursor if idx % 2 == 0 else right_cursor
+        next_row = _write_kpi_section(
+            ws, start_row=row,
+            col_left=col_left, col_right=col_right,
+            title=title,
+            accent_primary=primary, accent_soft=soft,
+            metrics=metrics,
+        )
+        if idx % 2 == 0:
+            left_cursor = next_row
+        else:
+            right_cursor = next_row
+
+    # ----- Column widths + freeze -------------------------------------
+    # All visible content lives within A:M. Uniform 14-wide columns
+    # give the 4 cards equal weight and let the title / banner / detail
+    # panels merge cleanly across the full visible width.
+    for letter in ("A", "B", "C", "D", "E", "F", "G", "H",
+                   "I", "J", "K", "L", "M"):
+        ws.column_dimensions[letter].width = 14
+    # Freeze just under the cards so title + banner + cards stay
+    # visible when the reader scrolls down to charts or details.
+    ws.freeze_panes = f"A{cards_row + _DASH_CARD_HEIGHT}"
 
 
 def export_report(
